@@ -66,7 +66,7 @@
       let val, source;
       if (L.rowMap[nk] != null && String(L.rowMap[nk]).trim() !== "") { val = String(L.rowMap[nk]); source = "row"; }
       else if (L.varMap[nk] != null && String(L.varMap[nk]).trim() !== "") { val = String(L.varMap[nk]); source = "var"; }
-      else if (L.builtMap[nk] != null && String(L.builtMap[nk]).trim() !== "") { val = String(L.builtMap[nk]); source = "builtin"; }
+      else if (L.builtMap[nk] != null) { val = String(L.builtMap[nk]); source = "builtin"; } // built-ins may be intentionally empty (no logo, no phone)
       else if (fallback != null) { val = fallback; source = "fallback"; }
       else { missing.add(key.trim()); return ""; }
 

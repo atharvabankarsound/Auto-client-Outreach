@@ -789,6 +789,11 @@
   $("#coAccent").oninput = (e) => { settings.company.accent = e.target.value; $("#coAccentText").value = e.target.value; saveSettings(); refreshSoon(); };
   $("#coAccentText").addEventListener("input", (e) => { const v = e.target.value.trim(); if (/^#[0-9a-f]{6}$/i.test(v)) { settings.company.accent = v; $("#coAccent").value = v; saveSettings(); refreshSoon(); } });
 
+  /* ---- light / dark theme ---- */
+  function applyTheme(t) { document.documentElement.setAttribute("data-theme", t); try { localStorage.setItem("aco.theme", t); } catch (e) {} $("#themeBtn").textContent = t === "dark" ? "☀" : "☾"; }
+  $("#themeBtn").onclick = () => applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
+  $("#themeBtn").textContent = document.documentElement.getAttribute("data-theme") === "dark" ? "☀" : "☾";
+
   window.addEventListener("beforeunload", (e) => { if (S.running) { e.preventDefault(); e.returnValue = ""; } });
 
   /* ---------------- init ---------------- */

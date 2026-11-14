@@ -9,6 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="assets/styles.css">
+<script>(function(){try{var t=localStorage.getItem("aco.theme");if(!t)t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t.replace(/"/g,""));}catch(e){}})();</script>
 </head>
 <body>
 <div class="wrap">
@@ -31,6 +32,7 @@
       <button class="btn primary" type="button" id="connectBtn">Connect Gmail</button>
       <button class="btn" type="button" id="disconnectBtn" hidden>Disconnect</button>
       <button class="btn" type="button" id="settingsBtn">Settings</button>
+      <button class="btn theme-toggle" type="button" id="themeBtn" aria-label="Switch between light and dark theme" title="Light / dark">◐</button>
     </div>
   </header>
 
