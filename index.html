@@ -17,14 +17,7 @@
     <div>
       <div class="eyebrow">Auto Client Outreach</div>
       <h1>Outreach</h1>
-      <div class="listpick">
-        <label class="eyebrow" for="tab">List</label>
-        <select class="in" id="tab" disabled><option>Upload a spreadsheet</option></select>
-        <label class="btn" for="fileInput">Upload Excel / CSV</label>
-        <input type="file" id="fileInput" accept=".xlsx,.xls,.xlsm,.csv,.tsv,.ods" hidden>
-        <a class="note" href="sample-contacts.xlsx" download>Sample sheet</a>
-      </div>
-      <p class="sub">Personalised emails for every client on your list, each built from your template. Create them as <b>drafts</b> in your Gmail, or send them straight from here with <b>Send now</b>. Nothing is sent until you press Send and confirm. Your list never leaves this browser.</p>
+      <p class="sub">Send personalised emails to a whole client list from your own Gmail, one at a time and at a human pace. Your spreadsheet never leaves this browser.</p>
     </div>
     <div class="account">
       <span id="accountPill" class="pill">Gmail not connected</span>
@@ -33,6 +26,99 @@
       <button class="btn" type="button" id="settingsBtn">Settings</button>
     </div>
   </header>
+
+  <section class="bar block howto" aria-label="How to use">
+    <ol class="steps">
+      <li><b>Upload your client sheet.</b> An Excel or CSV file with your clients’ details and one column of email addresses (first row = column headings). Each sheet becomes a list.</li>
+      <li><b>Describe the email.</b> In <a href="#describe">Describe the Email</a>, say what kind of email you want: who it’s for, the headline, your opening line, what you offer and the button text. Columns from your sheet (like <code>{{First Name}}</code> or <code>{{Company}}</code>) are filled in for every client.</li>
+      <li><b>Add your logo.</b> Drop a PNG or JPG in <a href="#logo">Company Logo</a>. It appears in the email header and is sent inside the email.</li>
+      <li><b>Give your company details.</b> In <a href="#company">Company Details</a>, add your company name, email, phone number, website, header tagline and footer text. They fill the header, buttons and footer.</li>
+      <li><b>Connect Gmail, preview and send.</b> Click <b>Connect Gmail</b>, check the live preview for a few clients, then create drafts or send. Nothing goes out until you press Send and confirm.</li>
+    </ol>
+  </section>
+
+  <section class="bar block step" id="upload">
+    <h2><span class="num">1</span> Upload client sheet</h2>
+    <div class="listpick">
+      <label class="btn primary" for="fileInput">Upload Excel / CSV</label>
+      <input type="file" id="fileInput" accept=".xlsx,.xls,.xlsm,.csv,.tsv,.ods" hidden>
+      <label class="eyebrow" for="tab">List</label>
+      <select class="in" id="tab" disabled><option>No sheet yet</option></select>
+      <span class="note" id="fileNote">Columns needed: an email address column, plus anything you want to personalise (First Name, Company…). <a href="sample-contacts.xlsx" download>Download the sample sheet</a>.</span>
+    </div>
+  </section>
+
+  <section class="bar block step" id="describe">
+    <h2><span class="num">2</span> Describe the Email</h2>
+    <div class="tplgrid">
+      <label class="field"><span>Email style</span><select class="in" id="templateSelect"></select></label>
+      <label class="field"><span>Campaign name <i>(keeps track of who’s been emailed)</i></span><input class="in" id="campaignName" type="text" placeholder="e.g. Spring outreach"></label>
+    </div>
+    <label class="field"><span>Subject line</span><input class="in" id="subject" type="text"></label>
+    <div id="describeFields" class="describe"></div>
+    <details class="advanced" id="tplBox">
+      <summary>Advanced: edit the HTML, plain text and raw variables</summary>
+      <div class="btnrow">
+        <button class="btn sm" type="button" id="saveTemplateBtn">Save as my template</button>
+        <button class="btn sm" type="button" id="deleteTemplateBtn">Delete saved template</button>
+        <label class="btn sm">Import .html<input type="file" id="importHtml" accept=".html,.htm" hidden></label>
+      </div>
+      <div class="tags" id="tagBar"></div>
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="html" type="button">Designed (HTML)</button>
+        <button class="tab" data-tab="text" type="button">Plain text</button>
+        <button class="tab" data-tab="vars" type="button">All variables</button>
+      </div>
+      <div class="tabpanel" data-panel="html"><textarea id="htmlBody" class="in code" spellcheck="false" rows="12"></textarea></div>
+      <div class="tabpanel" data-panel="text" hidden>
+        <textarea id="textBody" class="in code" rows="12" placeholder="Leave empty to generate plain text from the designed version."></textarea>
+        <p class="note">Used for the “Plain personal email” style and as the text fallback inside designed emails.</p>
+      </div>
+      <div class="tabpanel" data-panel="vars" hidden>
+        <p class="note">Every variable the template uses. A spreadsheet column with the same name always wins, so any of these can be personalised per row. Values can contain HTML and other merge fields.</p>
+        <div id="varsList"></div>
+        <button class="btn sm" id="addVarBtn" type="button">+ Add variable</button>
+      </div>
+      <details class="help">
+        <summary>How merge fields work</summary>
+        <ul class="note">
+          <li><code>{{Company}}</code> fills from the column “Company”. Case, spaces and underscores are ignored, so <code>{{FIRST_NAME}}</code> matches “First Name”.</li>
+          <li><code>{{First Name|there}}</code> uses “there” when the cell is empty. <code>{{Company:url}}</code> URL-encodes the value for links.</li>
+          <li>Built-ins: <code>{{COMPANY_NAME}}</code>, <code>{{COMPANY_EMAIL}}</code>, <code>{{COMPANY_PHONE}}</code>, <code>{{WEBSITE}}</code>, <code>{{HEADER_TEXT}}</code>, <code>{{FOOTER_TEXT}}</code>, <code>{{LOGO:raw}}</code>, <code>{{COMPANY_CONTACT:raw}}</code>, <code>{{SENDER_NAME}}</code>, <code>{{SENDER_EMAIL}}</code>, <code>{{EMAIL}}</code>, <code>{{NAME}}</code>.</li>
+          <li>A missing field with no fallback is flagged in the preview, and that email won’t send until it’s fixed.</li>
+        </ul>
+      </details>
+    </details>
+  </section>
+
+  <div class="twocol">
+    <section class="bar block step" id="logo">
+      <h2><span class="num">3</span> Company Logo</h2>
+      <label class="logodrop" id="logoDrop" for="logoInput">
+        <img id="logoPreview" alt="" hidden>
+        <span id="logoText"><strong>Drop your logo or banner here</strong><br>PNG, JPG, GIF or SVG · shown in the email header · resized to 600px wide</span>
+      </label>
+      <input type="file" id="logoInput" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" hidden>
+      <div class="btnrow">
+        <label class="btn sm" for="logoInput">Choose image</label>
+        <button class="btn sm" type="button" id="logoRemove" hidden>Remove logo</button>
+        <label class="field inline-field"><span>Logo height in email</span><select class="in auto" id="logoHeight"><option value="40">Small (40px)</option><option value="56" selected>Medium (56px)</option><option value="80">Large (80px)</option><option value="120">Banner (120px)</option></select></label>
+      </div>
+    </section>
+
+    <section class="bar block step" id="company">
+      <h2><span class="num">4</span> Company Details</h2>
+      <div class="tplgrid">
+        <label class="field"><span>Company name</span><input class="in" id="coName" type="text" placeholder="Example Studio"></label>
+        <label class="field"><span>Accent colour</span><span class="inline"><input type="color" id="coAccent" value="#0071E3"><input class="in" id="coAccentText" type="text" value="#0071E3" style="width:110px"></span></label>
+        <label class="field"><span>Company email</span><input class="in" id="coEmail" type="email" placeholder="hello@example.com"></label>
+        <label class="field"><span>Phone number</span><input class="in" id="coPhone" type="tel" placeholder="+44 20 1234 5678"></label>
+        <label class="field"><span>Website</span><input class="in" id="coWebsite" type="url" placeholder="https://example.com"></label>
+        <label class="field"><span>Header tagline <i>(under the company name)</i></span><input class="in" id="coHeader" type="text" placeholder="Audio post-production for creators"></label>
+      </div>
+      <label class="field"><span>Footer text <i>(address, registration number, anything legal)</i></span><textarea class="in" id="coFooter" rows="2" placeholder="Example Studio Ltd · 1 High Street, London · Registered in England no. 12345678"></textarea></label>
+    </section>
+  </div>
 
   <div class="bar">
     <span class="stat"><b id="sSent">0</b> sent · <b id="sDone">0</b> drafted of <b id="sTotal">0</b></span>
@@ -49,45 +135,6 @@
     <button class="btn primary" type="button" id="sendSel" disabled>Send selected</button>
   </div>
 
-  <details class="bar block" id="tplBox">
-    <summary>Edit email template <span class="note" id="tplName"></span></summary>
-    <div class="tplgrid">
-      <label class="field"><span>Template</span><select class="in" id="templateSelect"></select></label>
-      <label class="field"><span>Campaign name <i>(keeps track of who's been emailed)</i></span><input class="in" id="campaignName" type="text" placeholder="e.g. Spring outreach"></label>
-    </div>
-    <div class="btnrow">
-      <button class="btn sm" type="button" id="saveTemplateBtn">Save as my template</button>
-      <button class="btn sm" type="button" id="deleteTemplateBtn">Delete saved template</button>
-      <label class="btn sm">Import .html<input type="file" id="importHtml" accept=".html,.htm" hidden></label>
-    </div>
-    <label class="field"><span>Subject</span><input class="in" id="subject" type="text"></label>
-    <div class="tags" id="tagBar"></div>
-    <div class="tabs" role="tablist">
-      <button class="tab active" data-tab="html" type="button">Designed (HTML)</button>
-      <button class="tab" data-tab="text" type="button">Plain text</button>
-      <button class="tab" data-tab="vars" type="button">Campaign variables</button>
-    </div>
-    <div class="tabpanel" data-panel="html"><textarea id="htmlBody" class="in code" spellcheck="false" rows="12"></textarea></div>
-    <div class="tabpanel" data-panel="text" hidden>
-      <textarea id="textBody" class="in code" rows="12" placeholder="Leave empty to generate plain text from the designed version."></textarea>
-      <p class="note">Used for the “Plain personal email” style and as the text fallback inside designed emails. Emails sent this way don't get your Gmail signature, so add your sign-off here.</p>
-    </div>
-    <div class="tabpanel" data-panel="vars" hidden>
-      <p class="note">Default values for merge fields. A spreadsheet column with the same name always wins, so any variable can be personalised per row. Values can contain HTML and other merge fields.</p>
-      <div id="varsList"></div>
-      <button class="btn sm" id="addVarBtn" type="button">+ Add variable</button>
-    </div>
-    <details class="help">
-      <summary>How merge fields work</summary>
-      <ul class="note">
-        <li><code>{{Show}}</code> fills from the column “Show”. Case, spaces and underscores are ignored, so <code>{{FIRST_NAMES}}</code> matches “First Names”.</li>
-        <li><code>{{First Names|there}}</code> uses “there” when the cell is empty. <code>{{Show:url}}</code> URL-encodes the value for links.</li>
-        <li>Built-ins: <code>{{EMAIL}}</code>, <code>{{NAME}}</code>, <code>{{SENDER_NAME}}</code>, <code>{{SENDER_EMAIL}}</code>.</li>
-        <li>A missing field with no fallback is flagged in the preview, and that email won't send until it's fixed.</li>
-      </ul>
-    </details>
-  </details>
-
   <details class="bar block">
     <summary>Add addresses in bulk</summary>
     <p class="note">One per line: name as shown in the list, then email. For example: <code>Sci Guys, hello@example.com</code>. Addresses you add are saved in this browser.</p>
@@ -100,7 +147,7 @@
     <button class="btn" type="button" id="confirmNo">Cancel</button>
     <button class="btn primary" type="button" id="confirmYes">Yes, send now</button>
   </div>
-  <p class="note" id="status">Upload your client list (Excel or CSV) to begin. The first row must be column headings.</p>
+  <p class="note" id="status">Start with step 1: upload your client sheet.</p>
   <div class="progress" id="progressWrap" hidden><div class="pbar" id="progressBar"></div></div>
 
   <div class="main">
@@ -118,8 +165,8 @@
       </div>
       <div id="rows">
         <label class="drop" id="dropZone" for="fileInput">
-          <strong>Drop your Excel or CSV here</strong>
-          <span>.xlsx .xls .csv .ods · first row = column headings · one column of email addresses</span>
+          <strong>Your clients will appear here</strong>
+          <span>Upload a sheet in step 1, or drop an Excel / CSV file anywhere on this page</span>
         </label>
       </div>
     </section>

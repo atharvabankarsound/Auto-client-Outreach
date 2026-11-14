@@ -184,3 +184,26 @@ dialog summary{cursor:pointer;font-weight:600}
 .doc h1{font-size:34px;color:var(--fg)}
 .doc h2{font-family:var(--display);font-weight:600;font-size:19px;color:var(--fg);margin-top:28px}
 .doc .tiny{color:var(--mute);font-size:12px}
+
+/* guided steps */
+.howto{padding:16px 20px}
+.steps{margin:0;padding-left:0;list-style:none;counter-reset:s;display:grid;gap:10px}
+.steps li{position:relative;padding-left:36px;line-height:1.5;color:var(--mute);font-size:13.5px;counter-increment:s}
+.steps li b{color:var(--fg);font-weight:600}
+.steps li::before{content:counter(s);position:absolute;left:0;top:1px;width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.step h2{font-family:var(--display);font-size:18px;font-weight:600;letter-spacing:-.015em;margin:2px 0 8px;display:flex;align-items:center;gap:10px}
+.step .num{width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;font-size:13px;font-weight:700;display:inline-flex;align-items:center;justify-content:center}
+.twocol{display:grid;grid-template-columns:minmax(0,380px) minmax(0,1fr);gap:16px}
+.describe{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+.describe .field.wide{grid-column:1/-1}
+.describe textarea{min-height:60px}
+.advanced{margin-top:8px}
+.advanced>summary{font-size:13px;color:var(--mute);font-weight:500}
+.logodrop{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center;min-height:150px;padding:18px;border:1.5px dashed var(--stroke2);border-radius:14px;cursor:pointer;color:var(--mute);font-size:12.5px;line-height:1.5;background:rgba(255,255,255,.5)}
+.logodrop:hover,.logodrop.over{border-color:var(--accent);background:var(--accent-soft)}
+.logodrop strong{color:var(--fg);font-size:14px}
+.logodrop img{max-width:100%;max-height:120px;object-fit:contain}
+.inline-field{flex-direction:row;align-items:center;gap:8px;margin:0 0 0 auto}
+.inline-field>span{white-space:nowrap}
+input[type=color]{width:38px;height:36px;border:1px solid var(--stroke);border-radius:10px;padding:2px;background:#fff;cursor:pointer}
+@media (max-width:860px){.twocol,.describe{grid-template-columns:1fr}.inline-field{margin-left:0}}

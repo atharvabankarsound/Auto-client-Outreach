@@ -138,7 +138,7 @@
   }
 
   function buildMime(m) {
-    const boundary = "b_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    const rnd = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
     const h = [];
     h.push("From: " + addressHeader(m.fromName, m.fromEmail));
     h.push("To: " + addressHeader(m.toName, m.to));
@@ -148,24 +148,34 @@
       h.push("List-Unsubscribe: <mailto:" + cleanHeader(m.unsubscribeMailto) + "?subject=unsubscribe>");
     }
     h.push("MIME-Version: 1.0");
-    if (m.html) {
-      h.push('Content-Type: multipart/alternative; boundary="' + boundary + '"');
-      const body = [
-        "--" + boundary,
-        "Content-Type: text/plain; charset=UTF-8",
-        "Content-Transfer-Encoding: base64", "",
-        wrap76(utf8ToBase64(m.text || htmlToText(m.html))),
-        "--" + boundary,
-        "Content-Type: text/html; charset=UTF-8",
-        "Content-Transfer-Encoding: base64", "",
-        wrap76(utf8ToBase64(m.html)),
-        "--" + boundary + "--", ""
-      ].join("\r\n");
-      return h.join("\r\n") + "\r\n\r\n" + body;
+    const textPart = (b) => ["--" + b, "Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: base64", "", wrap76(utf8ToBase64(m.text || htmlToText(m.html)))].join("\r\n");
+    const htmlPart = (b) => ["--" + b, "Content-Type: text/html; charset=UTF-8", "Content-Transfer-Encoding: base64", "", wrap76(utf8ToBase64(m.html))].join("\r\n");
+    if (!m.html) {
+      h.push("Content-Type: text/plain; charset=UTF-8");
+      h.push("Content-Transfer-Encoding: base64");
+      return h.join("\r\n") + "\r\n\r\n" + wrap76(utf8ToBase64(m.text || "")) + "\r\n";
     }
-    h.push("Content-Type: text/plain; charset=UTF-8");
-    h.push("Content-Transfer-Encoding: base64");
-    return h.join("\r\n") + "\r\n\r\n" + wrap76(utf8ToBase64(m.text || "")) + "\r\n";
+    const alt = "alt_" + rnd();
+    const altBody = [textPart(alt), htmlPart(alt), "--" + alt + "--", ""].join("\r\n");
+    const images = (m.inlineImages || []).filter((im) => im && im.cid && im.base64);
+    if (!images.length) {
+      h.push('Content-Type: multipart/alternative; boundary="' + alt + '"');
+      return h.join("\r\n") + "\r\n\r\n" + altBody;
+    }
+    /* Inline images (a logo, say) travel inside multipart/related so Gmail shows them without "display images". */
+    const rel = "rel_" + rnd();
+    const parts = ["--" + rel, 'Content-Type: multipart/alternative; boundary="' + alt + '"', "", altBody];
+    images.forEach((im) => {
+      parts.push("--" + rel,
+        "Content-Type: " + (im.mime || "image/png") + '; name="' + (im.name || im.cid) + '"',
+        "Content-Transfer-Encoding: base64",
+        "Content-ID: <" + im.cid + ">",
+        'Content-Disposition: inline; filename="' + (im.name || im.cid) + '"', "",
+        wrap76(im.base64.replace(/\s+/g, "")));
+    });
+    parts.push("--" + rel + "--", "");
+    h.push('Content-Type: multipart/related; boundary="' + rel + '"; type="multipart/alternative"');
+    return h.join("\r\n") + "\r\n\r\n" + parts.join("\r\n");
   }
 
   function toBase64Url(str) {

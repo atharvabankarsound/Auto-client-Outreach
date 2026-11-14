@@ -2,7 +2,17 @@
 
 Personalised bulk email from your own Gmail, in the browser.
 
-Upload an Excel or CSV list of clients, write one template with merge fields like `{{First Name}}`, preview every email, then send at a safe, human pace. It comes with a ready-made designed email template, and anyone can edit it or write and save their own.
+Upload an Excel or CSV list of clients, describe the email you want, add your logo and company details, preview every email, then send at a safe, human pace.
+
+## How to use it
+
+1. **Upload your client sheet.** An Excel or CSV file with your clients' details and one column of email addresses (first row = column headings). Each sheet in the file becomes a list.
+2. **Describe the email.** Say who it's for, the headline, your opening line, what you offer and the button text. Columns from your sheet (`{{First Name}}`, `{{Company}}`…) are filled in for every client.
+3. **Add your logo.** Drop a PNG, JPG, GIF, WebP or SVG into **Company Logo**. It appears in the email header and is embedded in each email (so it shows without "display images").
+4. **Give your company details.** Company name, email, phone number, website, header tagline, footer text and accent colour. They fill the header, buttons and footer.
+5. **Connect Gmail, preview and send.** Check the preview for a few clients, send yourself a test, then create drafts or send. Nothing goes out until you press Send and confirm.
+
+Advanced users can edit the HTML, plain-text version and every variable directly, import their own HTML email, and save templates for reuse.
 
 **Live site:** https://atharvabankarsound.github.io/Auto-client-Outreach/
 
@@ -10,7 +20,8 @@ Upload an Excel or CSV list of clients, write one template with merge fields lik
 
 - **Connect Gmail** with Google sign-in. It only asks for *send* permission (`gmail.send`), so it can never read your inbox.
 - **Upload** `.xlsx`, `.xls`, `.csv` or `.ods`. It finds the email column automatically, flags invalid addresses and duplicates, and lets you tick who to include.
-- **Merge fields**: `{{Column}}`, `{{Column|fallback}}`, `{{Column:url}}`, plus *campaign variables* (default values any column can override per row).
+- **Merge fields**: `{{Column}}`, `{{Column|fallback}}`, `{{Column:url}}`, plus the *Describe the email* answers (defaults any column can override per row) and company built-ins (`{{COMPANY_NAME}}`, `{{LOGO:raw}}`, `{{COMPANY_CONTACT:raw}}`…).
+- **Logo and company details** stored in your browser and embedded in every email.
 - **Live preview** of the real email for each recipient, with missing fields flagged.
 - **Designed HTML + plain text** (multipart) or plain text only.
 - **Safe sending**: random pause between emails, a daily cap per account, pause/resume/stop, automatic pause on Gmail rate limits, and a reconnect prompt when the hour-long Google session runs out.
@@ -75,7 +86,7 @@ For the built-in **Designed outreach email** template, these columns personalise
 | `Company` | company name in subject and body |
 | `Hook` | the opening, personal sentence |
 
-Any campaign variable (e.g. `Headline`, `Offer`) can also be a column, to override it per row. Set your own company name, website, services and accent colour under **Edit email template → Campaign variables**.
+Any campaign variable (e.g. `Headline`, `Offer`) can also be a column, to override it per row. Company name, website, phone, logo and colours come from the **Company Logo** and **Company Details** sections.
 
 ## Sending responsibly
 

@@ -23,8 +23,11 @@
   const settings = Object.assign({
     senderName: "", fromAlias: "", replyTo: "", suppression: "", clientId: "", style: "design",
     delayMin: (CFG.defaultDelaySeconds || [25, 45])[0], delayMax: (CFG.defaultDelaySeconds || [25, 45])[1],
-    dailyLimit: CFG.defaultDailyLimit || 100, listUnsub: true
+    dailyLimit: CFG.defaultDailyLimit || 100, listUnsub: true,
+    company: { name: "", email: "", phone: "", website: "", header: "", footer: "", accent: "#0071E3" },
+    logo: null, logoHeight: 56
   }, store.get("settings", {}));
+  settings.company = Object.assign({ name: "", email: "", phone: "", website: "", header: "", footer: "", accent: "#0071E3" }, settings.company || {});
   const saveSettings = () => store.set("settings", settings);
 
   /* ---------------- state ---------------- */
@@ -142,6 +145,7 @@
           const count = Math.max(0, XLSX.utils.sheet_to_json(S.workbook.Sheets[n], { header: 1, blankrows: false }).length - 1);
           return `<option value="${esc(n)}">${esc(n)} (${count})</option>`;
         }).join("");
+        $("#fileNote").innerHTML = `<span class="ok">Loaded ${esc(file.name)}.</span> Upload another file to replace it.`;
         loadSheet(S.workbook.SheetNames[0]);
         setStatus("Pick a name to preview its email. Tick the ones you want, then create drafts or send.");
       } catch (err) { console.error(err); setStatus('<span class="err">Couldn’t read that file. Is it a valid Excel or CSV file?</span>'); }
@@ -193,11 +197,34 @@
     return v;
   }
 
+  /* Company details, logo and sender become merge fields every template can use. */
+  function companyBuiltins() {
+    const co = settings.company, e = esc;
+    const senderName = settings.senderName || S.googleName || (S.email ? S.email.split("@")[0] : "[your name]");
+    const coEmail = co.email || senderEmail() || "[your email]";
+    const site = co.website ? (/^https?:\/\//i.test(co.website) ? co.website : "https://" + co.website) : "";
+    const siteLabel = site.replace(/^https?:\/\//i, "").replace(/\/$/, "");
+    const bits = [];
+    if (coEmail && !/^\[/.test(coEmail)) bits.push({ h: `<a href="mailto:${e(coEmail)}" style="color:inherit;text-decoration:none;">${e(coEmail)}</a>`, t: coEmail });
+    if (co.phone) bits.push({ h: e(co.phone), t: co.phone });
+    if (site) bits.push({ h: `<a href="${e(site)}" style="color:${e(co.accent || "#0071E3")};text-decoration:none;">${e(siteLabel)}</a>`, t: site });
+    const logoHtml = settings.logo ? `<img src="cid:companylogo" alt="${e(co.name || "Logo")}" height="${settings.logoHeight || 56}" style="display:block;height:${settings.logoHeight || 56}px;width:auto;max-width:260px;border:0;">` : "";
+    return {
+      SENDER_NAME: senderName, SENDER_EMAIL: senderEmail() || "[your Gmail address]",
+      COMPANY_NAME: co.name || senderName, COMPANY_EMAIL: coEmail, COMPANY_PHONE: co.phone || "",
+      WEBSITE: site || "https://example.com", WEBSITE_LABEL: siteLabel || "example.com",
+      HEADER_TEXT: co.header || "", FOOTER_TEXT: co.footer || "", ACCENT: co.accent || "#0071E3",
+      LOGO: logoHtml, COMPANY_CONTACT: bits.map((b) => b.h).join(" &middot; "), COMPANY_CONTACT_TEXT: bits.map((b) => b.t).join(" | ")
+    };
+  }
+  const forPreview = (html) => settings.logo ? html.split("cid:companylogo").join(settings.logo.dataUrl) : html;
+  const inlineImages = () => settings.logo ? [{ cid: "companylogo", mime: settings.logo.mime, base64: settings.logo.dataUrl.split(",")[1], name: "logo." + (settings.logo.mime.split("/")[1] || "png").replace("+xml", "") }] : [];
+
   function compose(r) {
     const missing = new Set();
     const ctx = {
       row: r ? r.row : {}, variables: currentVars(),
-      builtins: { EMAIL: r ? toOf(r) : "", NAME: r ? nameOf(r) : "", SENDER_NAME: settings.senderName || S.googleName || (S.email ? S.email.split("@")[0] : "[your name]"), SENDER_EMAIL: senderEmail() || "[your Gmail address]" }
+      builtins: Object.assign({ EMAIL: r ? toOf(r) : "", NAME: r ? nameOf(r) : "" }, companyBuiltins())
     };
     const subject = C.render($("#subject").value, ctx, { html: false, missing }).replace(/\s+/g, " ").trim();
     const designed = settings.style !== "plain";
@@ -224,12 +251,34 @@
     if (id && allTemplates().some((t) => t.id === id)) $("#templateSelect").value = id;
     const cur = allTemplates().find((t) => t.id === $("#templateSelect").value);
     $("#deleteTemplateBtn").disabled = !(cur && cur.mine);
-    $("#tplName").textContent = cur ? "· " + cur.name : "";
   }
   function applyTemplate(t) {
     $("#subject").value = t.subject || ""; $("#htmlBody").value = t.html || ""; $("#textBody").value = t.text || "";
     $("#varsList").innerHTML = ""; Object.keys(t.variables || {}).forEach((k) => addVarRow(k, t.variables[k]));
+    renderDescribe(t);
     saveDraft(); refresh();
+  }
+
+  /* "Describe the email": labelled fields over the template's variables. */
+  function renderDescribe(t) {
+    const base = allTemplates().find((x) => x.id === (t.baseId || t.id)) || t;
+    const fields = base.fields || t.fields || [];
+    const box = $("#describeFields");
+    if (!fields.length) {
+      box.innerHTML = '<p class="note" style="grid-column:1/-1">This style has no guided fields. Write the email under “Advanced” below; the logo and company details are still available as merge fields.</p>';
+      return;
+    }
+    box.innerHTML = fields.map((f) => `<label class="field ${f.multiline ? "wide" : ""}"><span>${esc(f.label)}</span>${f.multiline ? `<textarea class="in" rows="2" data-var="${esc(f.key)}"></textarea>` : `<input class="in" type="text" data-var="${esc(f.key)}">`}${f.hint ? `<small>${esc(f.hint)}</small>` : ""}</label>`).join("");
+    syncDescribeFromVars();
+  }
+  function syncDescribeFromVars() {
+    const v = currentVars();
+    document.querySelectorAll("#describeFields [data-var]").forEach((el) => { if (document.activeElement !== el) el.value = v[el.dataset.var] != null ? v[el.dataset.var] : ""; });
+  }
+  function setVar(key, value) {
+    let row = Array.from(document.querySelectorAll("#varsList .var-row")).find((r) => r.querySelector("input").value.trim() === key);
+    if (!row) { addVarRow(key, value); return; }
+    row.querySelector("textarea").value = value;
   }
   function addVarRow(k, v) {
     const d = document.createElement("div");
@@ -306,7 +355,7 @@
   function frameDoc(m) {
     return settings.style === "plain"
       ? `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#fff;color:#202124;font:14px/1.6 Arial,sans-serif;padding:24px 28px;white-space:pre-wrap">${esc(m.text)}</body></html>`
-      : `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"></head><body style="margin:0;background:#E4E2DD">${m.html}</body></html>`;
+      : `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"></head><body style="margin:0;background:#E4E2DD">${forPreview(m.html)}</body></html>`;
   }
 
   function show(k) {
@@ -380,7 +429,7 @@
     return C.toBase64Url(C.buildMime({
       fromName: settings.senderName || S.googleName || "", fromEmail: senderEmail(),
       to: toOf(r), toName: nameOf(r), replyTo: settings.replyTo || "",
-      subject: m.subject, html: m.html, text: m.text,
+      subject: m.subject, html: m.html, text: m.text, inlineImages: m.html ? inlineImages() : [],
       unsubscribeMailto: settings.listUnsub ? (settings.replyTo || senderEmail()) : ""
     }));
   }
@@ -624,7 +673,7 @@
   const curRec = () => recByKey(S.cur);
   $("#cpTo").onclick = async () => { const r = curRec(); if (r) $("#cpNote").textContent = await copyText(toOf(r)); };
   $("#cpSubj").onclick = async () => { const r = curRec(); if (r) $("#cpNote").textContent = await copyText(compose(r).subject); };
-  $("#cpBody").onclick = async () => { const r = curRec(); if (!r) return; const m = compose(r); $("#cpNote").textContent = await copyText(m.text, settings.style === "plain" ? null : m.html); };
+  $("#cpBody").onclick = async () => { const r = curRec(); if (!r) return; const m = compose(r); $("#cpNote").textContent = await copyText(m.text, settings.style === "plain" ? null : forPreview(m.html)); };
   $("#markSent").onclick = () => {
     const r = curRec(); if (!r) return; const c = camp(); const to = toOf(r, c).toLowerCase();
     if (!to) { $("#cpNote").textContent = "Add the address first."; return; }
@@ -652,7 +701,8 @@
     const mine = store.get("templates", []);
     let t = mine.find((x) => x.name === name);
     if (!t) { t = { id: "mine-" + Date.now().toString(36), name }; mine.push(t); }
-    Object.assign(t, { subject: $("#subject").value, html: $("#htmlBody").value, text: $("#textBody").value, variables: currentVars() });
+    const curBase = allTemplates().find((x) => x.id === $("#templateSelect").value);
+    Object.assign(t, { subject: $("#subject").value, html: $("#htmlBody").value, text: $("#textBody").value, variables: currentVars(), baseId: (curBase && (curBase.baseId || curBase.id)) || t.baseId, fields: (curBase && curBase.fields) || t.fields || [] });
     store.set("templates", mine); renderTemplateSelect(t.id); saveDraft(); setStatus(`<span class="ok">Saved “${esc(name)}” in this browser.</span>`);
   };
   $("#deleteTemplateBtn").onclick = () => {
@@ -684,13 +734,69 @@
   $("#clearLogBtn").onclick = () => { $("#settingsDialog").close(); askConfirm(`Clear the sent and drafted log for “${campaignName()}”? Everyone could be emailed again.`, "Clear log", () => { store.del(campKey()); refresh(); }); };
   $("#clearAllBtn").onclick = () => { $("#settingsDialog").close(); askConfirm("Erase settings, templates, logs and added addresses from this browser?", "Erase everything", () => { Object.keys(localStorage).filter((k) => k.startsWith("aco.")).forEach((k) => localStorage.removeItem(k)); location.reload(); }); };
 
+  $("#describeFields").addEventListener("input", (e) => {
+    const el = e.target.closest("[data-var]"); if (!el) return;
+    setVar(el.dataset.var, el.value); saveDraft(); refreshSoon();
+  });
+  $("#varsList").addEventListener("input", syncDescribeFromVars);
+
+  /* ---- company logo ---- */
+  function setLogo(file) {
+    if (!file || !/^image\//.test(file.type)) { setStatus('<span class="err">Please choose a PNG, JPG, GIF, WebP or SVG image.</span>'); return; }
+    const finish = (dataUrl, mime) => {
+      if (dataUrl.length > 1.5e6) { setStatus('<span class="err">That image is too large after resizing (max about 1 MB). Try a smaller or simpler file.</span>'); return; }
+      settings.logo = { dataUrl, mime, name: file.name }; saveSettings(); renderLogo(); refresh();
+      setStatus('<span class="ok">Logo added. It appears in the email header and is sent inside each email.</span>');
+    };
+    const fr = new FileReader();
+    fr.onload = () => {
+      const src = String(fr.result);
+      if (file.type === "image/svg+xml" || file.type === "image/gif") return finish(src, file.type);
+      const img = new Image();
+      img.onload = () => {
+        const maxW = 600, maxH = 300, scale = Math.min(1, maxW / img.width, maxH / img.height);
+        if (scale === 1 && file.size < 300000) return finish(src, file.type);
+        const c = document.createElement("canvas"); c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        const png = file.type === "image/jpeg"; finish(c.toDataURL(png ? "image/jpeg" : "image/png", 0.9), png ? "image/jpeg" : "image/png");
+      };
+      img.onerror = () => setStatus('<span class="err">Couldn’t read that image.</span>');
+      img.src = src;
+    };
+    fr.readAsDataURL(file);
+  }
+  function renderLogo() {
+    const has = !!settings.logo;
+    $("#logoPreview").hidden = !has; if (has) $("#logoPreview").src = settings.logo.dataUrl;
+    $("#logoText").hidden = has; $("#logoRemove").hidden = !has; $("#logoHeight").value = String(settings.logoHeight || 56);
+  }
+  $("#logoInput").onchange = (e) => { if (e.target.files[0]) setLogo(e.target.files[0]); e.target.value = ""; };
+  $("#logoRemove").onclick = () => { settings.logo = null; saveSettings(); renderLogo(); refresh(); };
+  $("#logoHeight").onchange = (e) => { settings.logoHeight = Number(e.target.value) || 56; saveSettings(); refresh(); };
+  const logoDrop = $("#logoDrop");
+  ["dragenter", "dragover"].forEach((ev) => logoDrop.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); logoDrop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((ev) => logoDrop.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); logoDrop.classList.remove("over"); $(".list").classList.remove("over"); }));
+  logoDrop.addEventListener("drop", (e) => { if (e.dataTransfer.files[0]) setLogo(e.dataTransfer.files[0]); });
+
+  /* ---- company details ---- */
+  const coFields = { coName: "name", coEmail: "email", coPhone: "phone", coWebsite: "website", coHeader: "header", coFooter: "footer" };
+  function renderCompany() {
+    Object.keys(coFields).forEach((id) => { $("#" + id).value = settings.company[coFields[id]] || ""; });
+    $("#coAccent").value = /^#[0-9a-f]{6}$/i.test(settings.company.accent) ? settings.company.accent : "#0071E3";
+    $("#coAccentText").value = settings.company.accent || "#0071E3";
+  }
+  Object.keys(coFields).forEach((id) => { $("#" + id).addEventListener("input", (e) => { settings.company[coFields[id]] = e.target.value.trim(); saveSettings(); refreshSoon(); }); });
+  $("#coAccent").oninput = (e) => { settings.company.accent = e.target.value; $("#coAccentText").value = e.target.value; saveSettings(); refreshSoon(); };
+  $("#coAccentText").addEventListener("input", (e) => { const v = e.target.value.trim(); if (/^#[0-9a-f]{6}$/i.test(v)) { settings.company.accent = v; $("#coAccent").value = v; saveSettings(); refreshSoon(); } });
+
   window.addEventListener("beforeunload", (e) => { if (S.running) { e.preventDefault(); e.returnValue = ""; } });
 
   /* ---------------- init ---------------- */
   const draft = store.get("draft", null);
   renderTemplateSelect(draft && draft.templateId);
-  if (draft) { $("#campaignName").value = draft.campaign || ""; applyTemplate(draft); renderTemplateSelect(draft.templateId); }
+  if (draft) { $("#campaignName").value = draft.campaign || ""; applyTemplate(Object.assign({ baseId: draft.templateId }, draft)); renderTemplateSelect(draft.templateId); }
   else applyTemplate(BUILTIN_TEMPLATES[0]);
-  if (!clientId()) setStatus('Upload your client list (Excel or CSV) to begin. <span class="warn">This site has no Google client ID yet, so Gmail can’t connect until one is added (Settings → Advanced, or config.js).</span>');
+  renderLogo(); renderCompany();
+  if (!clientId()) setStatus('Start with step 1: upload your client sheet. <span class="warn">This site has no Google client ID yet, so Gmail can’t connect until one is added (Settings → Advanced, or config.js).</span>');
   refresh();
 })();
