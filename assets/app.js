@@ -1,276 +1,189 @@
-/* Auto Client Outreach: all logic runs in the browser.
-   Contacts never leave the page except as the emails you send through Gmail. */
+/* Auto Client Outreach. Everything runs in the browser: the spreadsheet is read
+   locally and each email goes straight from this page to the Gmail API. */
 (function () {
   "use strict";
   const C = window.OutreachCore;
   const CFG = window.OUTREACH_CONFIG || {};
   const BUILTIN_TEMPLATES = window.OUTREACH_TEMPLATES || [];
-  const SCOPES = "openid email profile https://www.googleapis.com/auth/gmail.send";
+  const SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+  const COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
+  const BASE_SCOPES = "openid email profile " + SEND_SCOPE;
   const GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
-  const $ = (id) => document.getElementById(id);
+  const $ = (s) => document.querySelector(s);
   const esc = C.escapeHtml;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const validEmail = (v) => C.isEmail(v);
 
   /* ---------------- storage ---------------- */
   const store = {
     get(k, d) { try { const v = localStorage.getItem("aco." + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
-    set(k, v) { try { localStorage.setItem("aco." + k, JSON.stringify(v)); } catch (e) { /* storage full or blocked */ } },
+    set(k, v) { try { localStorage.setItem("aco." + k, JSON.stringify(v)); } catch (e) {} },
     del(k) { try { localStorage.removeItem("aco." + k); } catch (e) {} }
   };
-
-  /* ---------------- state ---------------- */
-  const S = {
-    token: null, tokenExp: 0, email: "", googleName: "", tokenClient: null,
-    workbook: null, fileName: "", headers: [], recs: [], emailCol: "", nameCol: "",
-    selected: new Set(), previewPos: 0, filter: "",
-    sending: false, paused: false, stop: false, waitingAuth: false,
-    results: [], lastFocus: null
-  };
-
   const settings = Object.assign({
-    senderName: "", fromAlias: "", replyTo: "", suppression: "", clientId: "",
+    senderName: "", fromAlias: "", replyTo: "", suppression: "", clientId: "", style: "design",
     delayMin: (CFG.defaultDelaySeconds || [25, 45])[0], delayMax: (CFG.defaultDelaySeconds || [25, 45])[1],
-    dailyLimit: CFG.defaultDailyLimit || 100
+    dailyLimit: CFG.defaultDailyLimit || 100, listUnsub: true
   }, store.get("settings", {}));
   const saveSettings = () => store.set("settings", settings);
 
-  let draft = store.get("draft", null);
+  /* ---------------- state ---------------- */
+  const S = {
+    token: null, tokenExp: 0, scopes: new Set(), email: "", googleName: "", tokenClient: null,
+    pending: null, authWaiters: [], waitingAuth: false,
+    workbook: null, fileName: "", sheet: "", headers: [], recs: [],
+    emailCol: "", titleCol: "", nameCol: "",
+    sel: new Set(), cur: null, busy: new Set(), sending: new Set(), err: new Map(),
+    running: false, runKind: null, stop: false, lastFocus: null, memo: null
+  };
 
-  /* ---------------- toast ---------------- */
-  let toastTimer;
-  function toast(msg, bad) {
-    const t = $("toast");
-    t.textContent = msg; t.className = "toast show" + (bad ? " bad" : "");
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.className = "toast"; }, bad ? 6000 : 3200);
-  }
-
-  /* ---------------- helpers ---------------- */
-  const today = () => new Date().toISOString().slice(0, 10);
+  /* ---------------- campaign log (sent / drafted / edited addresses) ---------------- */
+  function campaignName() { return $("#campaignName").value.trim() || S.fileName.replace(/\.[^.]+$/, "") || "default"; }
+  function campKey() { return "camp." + campaignName(); }
+  function camp() { const c = store.get(campKey(), null) || {}; c.sent = c.sent || {}; c.drafted = c.drafted || {}; c.to = c.to || {}; return c; }
+  function saveCamp(c) { store.set(campKey(), c); }
+  function dailyKey() { return "daily." + (S.email || "anon") + "." + new Date().toISOString().slice(0, 10); }
+  const dailyCount = () => store.get(dailyKey(), 0);
+  const bumpDaily = () => store.set(dailyKey(), dailyCount() + 1);
+  const suppressed = () => new Set(String(settings.suppression || "").split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean));
   const senderEmail = () => (settings.fromAlias || S.email || "").trim();
-  const suppressionSet = () => new Set(String(settings.suppression || "").split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter(Boolean));
-  const campaignKey = () => (S.email || "anon") + "::" + ($("campaignName").value.trim() || "default");
-  function sentLog() { const all = store.get("sent", {}); return all[campaignKey()] || {}; }
-  function markSent(email, info) {
-    const all = store.get("sent", {}); const k = campaignKey();
-    all[k] = all[k] || {}; all[k][email] = info; store.set("sent", all);
-  }
-  function dailyCount() { return (store.get("daily", {})[(S.email || "anon") + "|" + today()]) || 0; }
-  function bumpDaily() {
-    const d = store.get("daily", {}); const k = (S.email || "anon") + "|" + today();
-    // prune old days
-    Object.keys(d).forEach((key) => { if (!key.endsWith(today())) delete d[key]; });
-    d[k] = (d[k] || 0) + 1; store.set("daily", d);
-  }
-  function clientId() { return (settings.clientId || CFG.googleClientId || "").trim(); }
-  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-  function fmtDur(sec) {
-    sec = Math.round(sec); if (sec < 60) return sec + "s";
-    const m = Math.round(sec / 60); if (m < 60) return m + " min";
-    return Math.floor(m / 60) + " h " + (m % 60) + " min";
-  }
+  const clientId = () => (settings.clientId || CFG.googleClientId || "").trim();
+
+  function setStatus(html) { $("#status").innerHTML = html; }
 
   /* =========================================================
-     1. GMAIL CONNECTION (Google Identity Services token model)
+     GMAIL CONNECTION (Google Identity Services, token model)
      ========================================================= */
-  function waitForGis(timeoutMs) {
+  function gisReady() { return !!(window.google && google.accounts && google.accounts.oauth2); }
+  const tokenValid = (margin) => !!S.token && Date.now() < S.tokenExp - (margin || 0);
+  const hasScope = (sc) => tokenValid(60000) && S.scopes.has(sc);
+
+  /* Must be called directly inside a click handler (Google opens a popup). */
+  function requestToken(extraScope) {
     return new Promise((resolve, reject) => {
-      const t0 = Date.now();
-      (function check() {
-        if (window.google && google.accounts && google.accounts.oauth2) return resolve();
-        if (Date.now() - t0 > timeoutMs) return reject(new Error("Google sign-in didn't load. Check your connection or ad-blocker."));
-        setTimeout(check, 150);
-      })();
+      if (!clientId()) { setStatus('<span class="err">This site has no Google client ID yet. Open Settings → Advanced and paste one (see the README).</span>'); openSettings(true); return reject(new Error("no client id")); }
+      if (!gisReady()) { setStatus('<span class="err">Google sign-in is still loading (or blocked by an ad-blocker). Try again in a moment.</span>'); return reject(new Error("gis not ready")); }
+      if (!S.tokenClient || S.tokenClient._cid !== clientId()) {
+        S.tokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: clientId(), scope: BASE_SCOPES, callback: onToken,
+          error_callback: (e) => { const p = S.pending; S.pending = null; setStatus('<span class="err">Google sign-in was closed or blocked' + (e && e.type ? " (" + esc(e.type) + ")" : "") + ".</span>"); if (p) p.reject(new Error("popup")); }
+        });
+        S.tokenClient._cid = clientId();
+      }
+      S.pending = { resolve, reject, need: extraScope || SEND_SCOPE };
+      const scope = BASE_SCOPES + (extraScope && extraScope !== SEND_SCOPE ? " " + extraScope : "") + (S.scopes.has(COMPOSE_SCOPE) && extraScope !== COMPOSE_SCOPE ? " " + COMPOSE_SCOPE : "");
+      S.tokenClient.requestAccessToken({ scope, include_granted_scopes: true, prompt: S.email ? "" : "consent", login_hint: S.email || undefined });
     });
   }
 
-  async function connect() {
-    if (!clientId()) { $("clientIdWarning").classList.remove("hidden"); openSettings(true); return; }
-    try { await waitForGis(8000); } catch (e) { toast(e.message, true); return; }
-    if (!S.tokenClient || S.tokenClient._cid !== clientId()) {
-      S.tokenClient = google.accounts.oauth2.initTokenClient({
-        client_id: clientId(),
-        scope: SCOPES,
-        callback: onToken,
-        error_callback: (err) => { toast("Google sign-in was cancelled or blocked" + (err && err.type ? " (" + err.type + ")" : "") + ".", true); }
-      });
-      S.tokenClient._cid = clientId();
-    }
-    S.tokenClient.requestAccessToken({ prompt: S.email ? "" : "consent", login_hint: S.email || undefined });
-  }
-
   async function onToken(resp) {
-    if (!resp || resp.error) { toast("Couldn't connect: " + ((resp && (resp.error_description || resp.error)) || "unknown error"), true); return; }
-    if (!google.accounts.oauth2.hasGrantedAllScopes(resp, "https://www.googleapis.com/auth/gmail.send")) {
-      toast("Please tick “Send email on your behalf” when Google asks, otherwise nothing can be sent.", true);
-      return;
-    }
+    const p = S.pending; S.pending = null;
+    if (!resp || resp.error) { setStatus('<span class="err">Couldn’t connect to Gmail: ' + esc((resp && (resp.error_description || resp.error)) || "unknown error") + "</span>"); if (p) p.reject(new Error("auth")); return; }
     S.token = resp.access_token;
     S.tokenExp = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
-    try {
-      const r = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", { headers: { Authorization: "Bearer " + S.token } });
-      const u = await r.json();
-      S.email = (u.email || "").toLowerCase(); S.googleName = u.name || "";
-    } catch (e) { /* keep going: sending still works */ }
+    S.scopes = new Set(String(resp.scope || "").split(/\s+/));
+    if (!S.email) {
+      try {
+        const u = await (await fetch("https://www.googleapis.com/oauth2/v3/userinfo", { headers: { Authorization: "Bearer " + S.token } })).json();
+        S.email = (u.email || "").toLowerCase(); S.googleName = u.name || "";
+      } catch (e) {}
+    }
     renderAccount();
-    toast("Connected as " + (S.email || "your Gmail account"));
-    if (S.waitingAuth) { S.waitingAuth = false; S.paused = false; updateSendButtons(); toast("Reconnected. Sending resumes."); }
-    refreshAll();
+    const need = p ? p.need : SEND_SCOPE;
+    if (!S.scopes.has(need)) {
+      const what = need === COMPOSE_SCOPE ? "“Manage drafts and send emails”" : "“Send email on your behalf”";
+      setStatus('<span class="err">Google didn’t grant ' + what + '. Click again and tick that box on the Google screen.</span>');
+      if (p) p.reject(new Error("scope"));
+      return;
+    }
+    if (S.waitingAuth) { S.waitingAuth = false; S.authWaiters.splice(0).forEach((f) => f()); }
+    if (p) p.resolve();
+    if (!S.running) setStatus('<span class="ok">Connected as ' + esc(S.email || "your Gmail account") + ".</span>");
+    refresh();
   }
 
-  function disconnect() {
-    if (S.sending) { toast("Stop sending first.", true); return; }
-    if (S.token && window.google && google.accounts) google.accounts.oauth2.revoke(S.token, () => {});
-    S.token = null; S.tokenExp = 0; S.email = ""; S.googleName = "";
-    renderAccount(); refreshAll();
+  function ensureScope(scope) {
+    if (hasScope(scope)) return Promise.resolve();
+    return requestToken(scope);
   }
 
-  function tokenValid(marginMs) { return !!S.token && Date.now() < S.tokenExp - (marginMs || 0); }
+  function waitForAuth() {
+    S.waitingAuth = true; renderAccount();
+    setStatus('<span class="warn">Your Google session ran out (they last an hour). Click <b>Reconnect Gmail</b> at the top to carry on. Nothing has been lost.</span>');
+    return new Promise((res) => S.authWaiters.push(res));
+  }
 
   function renderAccount() {
     const on = tokenValid(0);
-    $("accountPill").textContent = on ? S.email || "Connected" : (S.email ? "Session expired" : "Gmail not connected");
-    $("accountPill").className = "pill " + (on ? "pill-on" : "pill-off");
-    $("connectBtn").textContent = on ? "Connected ✓" : S.waitingAuth ? "Reconnect to continue sending" : (S.email ? "Reconnect Gmail" : "Connect Gmail");
-    $("connectBtn").disabled = on && !S.waitingAuth;
-    $("disconnectBtn").classList.toggle("hidden", !S.email);
-    $("s1status").textContent = on ? "Connected" : "Not connected";
-    $("s1status").className = "status " + (on ? "ok" : "");
-    $("clientIdWarning").classList.toggle("hidden", !!clientId());
+    $("#accountPill").textContent = on ? "✓ " + (settings.fromAlias || S.email) : S.email ? "Session expired" : "Gmail not connected";
+    $("#accountPill").className = "pill " + (on ? "done" : S.waitingAuth ? "busy" : "");
+    $("#connectBtn").hidden = on && !S.waitingAuth;
+    $("#connectBtn").textContent = S.email ? "Reconnect Gmail" : "Connect Gmail";
+    $("#disconnectBtn").hidden = !S.email;
+    $("#gmailSentLink").href = "https://mail.google.com/mail/" + (S.email ? "?authuser=" + encodeURIComponent(S.email) : "") + "#sent";
   }
   setInterval(renderAccount, 30000);
 
   /* =========================================================
-     2. CONTACTS
+     SPREADSHEET
      ========================================================= */
   function readFile(file) {
-    if (!window.XLSX) { toast("The spreadsheet reader didn't load. Refresh the page and try again.", true); return; }
-    const reader = new FileReader();
-    reader.onload = (e) => {
+    if (S.running) return;
+    if (!window.XLSX) { setStatus('<span class="err">The spreadsheet reader didn’t load. Refresh the page and try again.</span>'); return; }
+    const fr = new FileReader();
+    fr.onload = (e) => {
       try {
-        const wb = XLSX.read(new Uint8Array(e.target.result), { type: "array", cellDates: true });
-        S.workbook = wb; S.fileName = file.name;
-        $("sheetSelect").innerHTML = wb.SheetNames.map((n) => `<option>${esc(n)}</option>`).join("");
-        loadSheet(wb.SheetNames[0]);
-        $("sheetControls").classList.remove("hidden");
-        toast("Loaded " + file.name);
-      } catch (err) { console.error(err); toast("Couldn't read that file. Is it a valid Excel or CSV file?", true); }
+        S.workbook = XLSX.read(new Uint8Array(e.target.result), { type: "array", cellDates: true });
+        S.fileName = file.name;
+        if (!$("#campaignName").value.trim()) { $("#campaignName").value = file.name.replace(/\.[^.]+$/, ""); saveDraft(); }
+        const tab = $("#tab");
+        tab.disabled = false;
+        tab.innerHTML = S.workbook.SheetNames.map((n) => {
+          const count = Math.max(0, XLSX.utils.sheet_to_json(S.workbook.Sheets[n], { header: 1, blankrows: false }).length - 1);
+          return `<option value="${esc(n)}">${esc(n)} (${count})</option>`;
+        }).join("");
+        loadSheet(S.workbook.SheetNames[0]);
+        setStatus("Pick a name to preview its email. Tick the ones you want, then create drafts or send.");
+      } catch (err) { console.error(err); setStatus('<span class="err">Couldn’t read that file. Is it a valid Excel or CSV file?</span>'); }
     };
-    reader.readAsArrayBuffer(file);
+    fr.readAsArrayBuffer(file);
   }
 
   function loadSheet(name) {
-    const ws = S.workbook.Sheets[name];
-    const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "", blankrows: false });
-    if (!aoa.length) { S.headers = []; S.recs = []; renderContacts(); return; }
+    S.sheet = name;
+    const aoa = XLSX.utils.sheet_to_json(S.workbook.Sheets[name], { header: 1, raw: false, defval: "", blankrows: false });
     const seen = {};
-    const headers = aoa[0].map((h, i) => {
+    const headers = (aoa[0] || []).map((h, i) => {
       let n = String(h || "").trim() || "Column " + (i + 1);
-      if (seen[n]) { seen[n]++; n = n + " (" + seen[n] + ")"; } else seen[n] = 1;
+      if (seen[n]) { seen[n]++; n += " (" + seen[n] + ")"; } else seen[n] = 1;
       return n;
     });
     const rows = aoa.slice(1).filter((r) => r.some((c) => String(c).trim() !== "")).map((r) => {
       const o = {}; headers.forEach((h, i) => { o[h] = r[i] == null ? "" : String(r[i]).trim(); }); return o;
     });
     S.headers = headers;
-    S.emailCol = C.detectEmailColumn(headers, rows) || headers[0];
-    S.nameCol = headers.find((h) => /^(first\s*_?names?|name|full\s*name|contact(\s*name)?)$/i.test(h.trim())) || "";
-    const opts = (withNone) => (withNone ? `<option value="">— none —</option>` : "") + headers.map((h) => `<option>${esc(h)}</option>`).join("");
-    $("emailColSelect").innerHTML = opts(false); $("emailColSelect").value = S.emailCol;
-    $("nameColSelect").innerHTML = opts(true); $("nameColSelect").value = S.nameCol;
-    S.recs = rows.map((row, i) => ({ i, row }));
-    rebuildRecs(true);
+    S.recs = rows.map((row, i) => ({ key: name + "#" + (i + 2), i, row }));
+    S.emailCol = C.detectEmailColumn(headers, rows) || headers[0] || "";
+    S.nameCol = headers.find((h) => /^(first\s*_?names?|name|full\s*name|contact(\s*name)?|hosts?)$/i.test(h.trim())) || "";
+    S.titleCol = headers.find((h) => /^(show|podcast|channel|company|business|organi[sz]ation|brand|studio|title|client)$/i.test(h.trim())) || S.nameCol || S.emailCol;
+    const opts = (none) => (none ? '<option value="">— none —</option>' : "") + headers.map((h) => `<option>${esc(h)}</option>`).join("");
+    $("#emailColSelect").innerHTML = opts(false); $("#emailColSelect").value = S.emailCol;
+    $("#titleColSelect").innerHTML = opts(false); $("#titleColSelect").value = S.titleCol;
+    $("#nameColSelect").innerHTML = opts(true); $("#nameColSelect").value = S.nameCol;
+    S.sel.clear(); S.err.clear();
+    S.cur = S.recs[0] ? S.recs[0].key : null;
+    refresh();
   }
 
-  function rebuildRecs(resetSelection) {
-    const seen = new Set();
-    S.recs.forEach((r) => {
-      r.email = C.extractEmail(r.row[S.emailCol]);
-      r.valid = !!r.email;
-      r.dup = r.valid && seen.has(r.email);
-      if (r.valid) seen.add(r.email);
-      r.name = S.nameCol ? r.row[S.nameCol] : "";
-    });
-    if (resetSelection) {
-      const sup = suppressionSet();
-      S.selected = new Set(S.recs.filter((r) => r.valid && !r.dup && !sup.has(r.email)).map((r) => r.i));
-      S.previewPos = 0;
-    }
-    refreshAll();
-  }
-
-  function missingFor(r) {
-    if (!S.memo) S.memo = new Map();
-    if (!S.memo.has(r.i)) S.memo.set(r.i, compose(r).missing);
-    return S.memo.get(r.i);
-  }
-
-  function recStatus(r) {
-    if (!r.valid) return ["invalid", "No valid email", "b-bad"];
-    if (r.dup) return ["dup", "Duplicate", "b-mute"];
-    if (suppressionSet().has(r.email)) return ["suppressed", "Do not email", "b-mute"];
-    if (sentLog()[r.email]) return ["sent", "Already sent", "b-ok"];
-    const m = missingFor(r);
-    if (m.length) return ["missing", "Missing: " + m.join(", "), "b-warn"];
-    return ["ready", "Ready", "b-ok"];
-  }
-
-  function renderContacts() {
-    const tbl = $("contactTable");
-    if (!S.headers.length) { tbl.innerHTML = ""; $("contactStats").innerHTML = ""; $("s2status").textContent = ""; return; }
-    const f = S.filter.toLowerCase();
-    const visible = S.recs.filter((r) => !f || Object.values(r.row).some((v) => String(v).toLowerCase().includes(f)));
-    const limit = 500;
-    const cols = S.headers;
-    const curI = previewRecs()[S.previewPos] && previewRecs()[S.previewPos].i;
-    let html = "<thead><tr><th></th><th>#</th><th>Status</th>" + cols.map((h) => `<th>${esc(h)}</th>`).join("") + "</tr></thead><tbody>";
-    visible.slice(0, limit).forEach((r) => {
-      const st = recStatus(r);
-      const sel = S.selected.has(r.i);
-      html += `<tr data-i="${r.i}" class="${sel ? "sel" : ""} ${r.valid ? "" : "invalid"} ${r.i === curI ? "current" : ""}">` +
-        `<td><input type="checkbox" data-i="${r.i}" ${sel ? "checked" : ""} ${r.valid ? "" : "disabled"} aria-label="Include row ${r.i + 2}"></td>` +
-        `<td>${r.i + 2}</td><td><span class="badge ${st[2]}" title="${esc(st[1])}">${esc(st[1])}</span></td>` +
-        cols.map((h) => `<td title="${esc(r.row[h])}">${esc(r.row[h])}</td>`).join("") + "</tr>";
-    });
-    if (visible.length > limit) html += `<tr><td colspan="${cols.length + 3}" class="tiny">Showing the first ${limit} of ${visible.length} matching rows. Use search to find others. All rows are still included when sending.</td></tr>`;
-    tbl.innerHTML = html + "</tbody>";
-
-    const total = S.recs.length, valid = S.recs.filter((r) => r.valid).length;
-    const dups = S.recs.filter((r) => r.dup).length;
-    $("contactStats").innerHTML =
-      `<span class="stat"><b>${total}</b> rows</span>` +
-      `<span class="stat ok"><b>${valid - dups}</b> unique valid emails</span>` +
-      (total - valid ? `<span class="stat bad"><b>${total - valid}</b> without a valid email</span>` : "") +
-      (dups ? `<span class="stat warn"><b>${dups}</b> duplicates</span>` : "") +
-      `<span class="stat"><b>${S.selected.size}</b> selected</span>`;
-    $("s2status").textContent = S.selected.size + " selected";
-    $("s2status").className = "status " + (S.selected.size ? "ok" : "");
-  }
+  const recByKey = (k) => S.recs.find((r) => r.key === k);
+  function toOf(r, c) { c = c || camp(); return (c.to[r.key] != null ? c.to[r.key] : C.extractEmail(r.row[S.emailCol])) || ""; }
+  const nameOf = (r) => (S.nameCol ? r.row[S.nameCol] : "") || "";
+  const titleOf = (r) => r.row[S.titleCol] || nameOf(r) || toOf(r) || "Row " + (r.i + 2);
+  function secondaryOf(r) { const n = nameOf(r); return n && n !== titleOf(r) ? n : "Row " + (r.i + 2); }
 
   /* =========================================================
-     3. TEMPLATE
+     TEMPLATE & COMPOSE
      ========================================================= */
-  function allTemplates() {
-    const mine = store.get("templates", []).map((t) => Object.assign({}, t, { mine: true }));
-    return BUILTIN_TEMPLATES.concat(mine);
-  }
-
-  function renderTemplateSelect(selectedId) {
-    const list = allTemplates();
-    $("templateSelect").innerHTML =
-      `<optgroup label="Built-in">${BUILTIN_TEMPLATES.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</optgroup>` +
-      (list.some((t) => t.mine) ? `<optgroup label="My templates">${list.filter((t) => t.mine).map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</optgroup>` : "");
-    if (selectedId && list.some((t) => t.id === selectedId)) $("templateSelect").value = selectedId;
-    $("deleteTemplateBtn").disabled = !list.find((t) => t.id === $("templateSelect").value && t.mine);
-  }
-
-  function applyTemplate(t) {
-    $("subject").value = t.subject || "";
-    $("htmlBody").value = t.html || "";
-    $("textBody").value = t.text || "";
-    $("sendHtml").checked = t.sendHtml !== false;
-    renderVars(t.variables || {});
-    saveDraft(); refreshAll();
-  }
-
   function currentVars() {
     const v = {};
     document.querySelectorAll("#varsList .var-row").forEach((row) => {
@@ -280,456 +193,504 @@
     return v;
   }
 
-  function renderVars(vars) {
-    $("varsList").innerHTML = "";
-    Object.keys(vars).forEach((k) => addVarRow(k, vars[k]));
+  function compose(r) {
+    const missing = new Set();
+    const ctx = {
+      row: r ? r.row : {}, variables: currentVars(),
+      builtins: { EMAIL: r ? toOf(r) : "", NAME: r ? nameOf(r) : "", SENDER_NAME: settings.senderName || S.googleName || "", SENDER_EMAIL: senderEmail() }
+    };
+    const subject = C.render($("#subject").value, ctx, { html: false, missing }).replace(/\s+/g, " ").trim();
+    const designed = settings.style !== "plain";
+    const htmlRendered = C.render($("#htmlBody").value, ctx, { html: true, missing: designed ? missing : new Set() });
+    const textSrc = $("#textBody").value.trim();
+    const text = textSrc ? C.render(textSrc, ctx, { html: false, missing }) : C.htmlToText(htmlRendered);
+    if (!subject) missing.add("subject");
+    return { subject, html: designed ? htmlRendered : "", text, missing: Array.from(missing) };
+  }
+  function missingFor(r) {
+    if (!S.memo) S.memo = new Map();
+    if (!S.memo.has(r.key)) S.memo.set(r.key, compose(r).missing);
+    return S.memo.get(r.key);
+  }
+
+  function allTemplates() {
+    return BUILTIN_TEMPLATES.concat(store.get("templates", []).map((t) => Object.assign({}, t, { mine: true })));
+  }
+  function renderTemplateSelect(id) {
+    const mine = allTemplates().filter((t) => t.mine);
+    $("#templateSelect").innerHTML =
+      `<optgroup label="Built-in">${BUILTIN_TEMPLATES.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</optgroup>` +
+      (mine.length ? `<optgroup label="My templates">${mine.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</optgroup>` : "");
+    if (id && allTemplates().some((t) => t.id === id)) $("#templateSelect").value = id;
+    const cur = allTemplates().find((t) => t.id === $("#templateSelect").value);
+    $("#deleteTemplateBtn").disabled = !(cur && cur.mine);
+    $("#tplName").textContent = cur ? "· " + cur.name : "";
+  }
+  function applyTemplate(t) {
+    $("#subject").value = t.subject || ""; $("#htmlBody").value = t.html || ""; $("#textBody").value = t.text || "";
+    $("#varsList").innerHTML = ""; Object.keys(t.variables || {}).forEach((k) => addVarRow(k, t.variables[k]));
+    saveDraft(); refresh();
   }
   function addVarRow(k, v) {
     const d = document.createElement("div");
     d.className = "var-row";
-    d.innerHTML = `<input type="text" placeholder="NAME" aria-label="Variable name"><textarea rows="1" aria-label="Variable value"></textarea><button type="button" title="Remove" aria-label="Remove variable">×</button>`;
+    d.innerHTML = '<input class="in" type="text" placeholder="NAME" aria-label="Variable name"><textarea class="in" rows="1" aria-label="Variable value"></textarea><button type="button" aria-label="Remove variable">×</button>';
     d.querySelector("input").value = k || ""; d.querySelector("textarea").value = v || "";
-    d.querySelector("button").onclick = () => { d.remove(); saveDraft(); refreshAll(); };
-    d.addEventListener("input", () => { saveDraft(); refreshAllDebounced(); });
-    $("varsList").appendChild(d);
+    d.querySelector("button").onclick = () => { d.remove(); saveDraft(); refresh(); };
+    d.addEventListener("input", () => { saveDraft(); refreshSoon(); });
+    $("#varsList").appendChild(d);
   }
-
   function saveDraft() {
-    draft = {
-      templateId: $("templateSelect").value, campaign: $("campaignName").value,
-      subject: $("subject").value, html: $("htmlBody").value, text: $("textBody").value,
-      sendHtml: $("sendHtml").checked, variables: currentVars()
-    };
-    store.set("draft", draft);
+    store.set("draft", { templateId: $("#templateSelect").value, campaign: $("#campaignName").value, subject: $("#subject").value, html: $("#htmlBody").value, text: $("#textBody").value, variables: currentVars() });
   }
-
   function renderTagBar() {
     const vars = Object.keys(currentVars());
-    const builtins = ["EMAIL", "NAME", "SENDER_NAME", "SENDER_EMAIL"];
-    const cols = S.headers;
     let h = "";
-    if (cols.length) h += `<span class="label">Columns</span>` + cols.map((c) => `<button type="button" class="tag" data-tag="${esc(c)}">${esc(c)}</button>`).join("");
-    if (vars.length) h += `<span class="label">Variables</span>` + vars.map((c) => `<button type="button" class="tag var" data-tag="${esc(c)}">${esc(c)}</button>`).join("");
-    h += `<span class="label">Built-in</span>` + builtins.map((c) => `<button type="button" class="tag var" data-tag="${c}">${c}</button>`).join("");
-    $("tagBar").innerHTML = h;
+    if (S.headers.length) h += '<span class="label">Columns</span>' + S.headers.map((c) => `<button type="button" class="tag" data-tag="${esc(c)}">${esc(c)}</button>`).join("");
+    if (vars.length) h += '<span class="label">Variables</span>' + vars.map((c) => `<button type="button" class="tag var" data-tag="${esc(c)}">${esc(c)}</button>`).join("");
+    h += '<span class="label">Built-in</span>' + ["EMAIL", "NAME", "SENDER_NAME", "SENDER_EMAIL"].map((c) => `<button type="button" class="tag var" data-tag="${c}">${c}</button>`).join("");
+    $("#tagBar").innerHTML = h;
   }
-
   function insertTag(tag) {
-    const el = S.lastFocus || $("htmlBody");
+    const el = S.lastFocus || $("#htmlBody");
     const ins = "{{" + tag + "}}";
-    const s = el.selectionStart ?? el.value.length, e = el.selectionEnd ?? el.value.length;
+    const s = el.selectionStart != null ? el.selectionStart : el.value.length, e = el.selectionEnd != null ? el.selectionEnd : el.value.length;
     el.value = el.value.slice(0, s) + ins + el.value.slice(e);
     el.focus(); el.selectionStart = el.selectionEnd = s + ins.length;
     el.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
-  /* compose one email for a record */
-  function compose(r) {
-    const missing = new Set();
-    const row = r ? r.row : {};
-    const ctx = {
-      row, variables: currentVars(),
-      builtins: {
-        EMAIL: r ? r.email : "", NAME: r ? r.name : "",
-        SENDER_NAME: settings.senderName || S.googleName || "", SENDER_EMAIL: senderEmail()
-      }
-    };
-    const subject = C.render($("subject").value, ctx, { html: false, missing }).replace(/\s+/g, " ").trim();
-    const useHtml = $("sendHtml").checked;
-    const html = useHtml ? C.render($("htmlBody").value, ctx, { html: true, missing }) : "";
-    const textSrc = $("textBody").value.trim();
-    const text = textSrc ? C.render(textSrc, ctx, { html: false, missing }) : C.htmlToText(C.render($("htmlBody").value, ctx, { html: true, missing }));
-    if (!subject) missing.add("(subject is empty)");
-    return { subject, html, text, missing: Array.from(missing) };
-  }
-
   /* =========================================================
-     PREVIEW
+     LIST
      ========================================================= */
-  function previewRecs() {
-    const sel = S.recs.filter((r) => S.selected.has(r.i));
-    return sel.length ? sel : S.recs.filter((r) => r.valid);
+  function stateOf(r, c) {
+    const to = toOf(r, c).toLowerCase();
+    if (S.sending.has(r.key)) return ["busy", "Sending"];
+    if (to && c.sent[to]) { const n = c.sent[to].count || 1; return ["done", n > 1 ? "Sent ×" + n : "Sent"]; }
+    if (S.busy.has(r.key)) return ["busy", "Drafting"];
+    if (to && c.drafted[to]) { const n = c.drafted[to].count || 1; return ["done", n > 1 ? "Drafted ×" + n : "Drafted"]; }
+    if (S.err.has(r.key)) return ["err", "Failed"];
+    if (to && suppressed().has(to)) return ["err", "Do not email"];
+    if (to && !validEmail(to)) return ["err", "Bad address"];
+    if (missingFor(r).length) return ["busy", "Missing info"];
+    return ["", "Ready"];
   }
 
-  function renderPreview() {
-    const list = previewRecs();
-    if (S.previewPos >= list.length) S.previewPos = Math.max(0, list.length - 1);
-    const r = list[S.previewPos] || null;
+  function renderRows() {
+    if (!S.recs.length) { counts(); renderSent(); return; }
+    const c = camp();
+    const q = $("#q").value.trim().toLowerCase();
+    const list = S.recs.filter((r) => !q || Object.values(r.row).some((v) => String(v).toLowerCase().includes(q)));
+    $("#rows").innerHTML = list.map((r) => {
+      const [cls, label] = stateOf(r, c); const to = toOf(r, c);
+      return `<div class="row" data-k="${esc(r.key)}" aria-current="${S.cur === r.key}"><input type="checkbox" aria-label="Select ${esc(titleOf(r))}" ${S.sel.has(r.key) ? "checked" : ""}><span style="min-width:0"><b>${esc(titleOf(r))}</b><small>${to ? "✉ " + esc(to) : "No address yet"} · ${esc(secondaryOf(r))}</small></span><span class="pill ${cls}">${esc(label)}</span></div>`;
+    }).join("") || '<p class="note" style="padding:10px">No rows match your search.</p>';
+    counts(); renderSent();
+  }
+
+  function counts() {
+    const c = camp();
+    const tos = S.recs.map((r) => toOf(r, c).toLowerCase());
+    $("#sTotal").textContent = S.recs.length;
+    $("#sSent").textContent = tos.filter((t) => t && c.sent[t]).length;
+    $("#sDone").textContent = tos.filter((t) => t && c.drafted[t]).length;
+    $("#sSel").textContent = S.sel.size;
+    const n = S.sel.size, sendingRun = S.running && S.runKind === "send";
+    $("#make").disabled = S.running || !n;
+    $("#sendSel").disabled = !sendingRun && (S.running || !n);
+    $("#make").textContent = n ? `Create ${n} draft${n === 1 ? "" : "s"} in Gmail` : "Create drafts in Gmail";
+    $("#sendSel").textContent = sendingRun ? "Stop sending" : n ? `Send ${n} now` : "Send selected";
+    $("#sendSel").classList.toggle("primary", !sendingRun);
+  }
+
+  function frameDoc(m) {
+    return settings.style === "plain"
+      ? `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#fff;color:#202124;font:14px/1.6 Arial,sans-serif;padding:24px 28px;white-space:pre-wrap">${esc(m.text)}</body></html>`
+      : `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"></head><body style="margin:0;background:#E4E2DD">${m.html}</body></html>`;
+  }
+
+  function show(k) {
+    const r = recByKey(k);
+    if (!r) { renderEmpty(); return; }
+    S.cur = k;
+    const c = camp(); const to = toOf(r, c); const toL = to.toLowerCase();
     const m = compose(r);
-    $("previewWho").textContent = r ? `Recipient ${S.previewPos + 1} of ${list.length}${S.selected.size ? " selected" : ""} · sheet row ${r.i + 2}` : "Example with no spreadsheet data";
-    $("pvTo").textContent = r ? (r.name ? r.name + " <" + r.email + ">" : r.email) : "—";
-    $("pvSubject").textContent = m.subject || "(no subject)";
-    $("pvMissing").classList.toggle("hidden", !m.missing.length || !r);
-    $("pvMissing").textContent = m.missing.length ? "Missing for this recipient: " + m.missing.join(", ") + ". Add the column, a campaign variable or a fallback like {{Field|default}}." : "";
-    const useHtml = $("sendHtml").checked;
-    $("previewFrame").classList.toggle("hidden", !useHtml);
-    $("previewText").classList.toggle("hidden", useHtml);
-    if (useHtml) {
-      $("previewFrame").srcdoc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><style>body{margin:0;background:#fff}</style></head><body>${m.html}</body></html>`;
-    } else {
-      $("previewText").textContent = m.text;
-    }
-    const tplOk = !!$("subject").value.trim() && !!(useHtml ? $("htmlBody").value.trim() : (m.text || "").trim());
-    $("s3status").textContent = tplOk ? "Ready" : "Needs subject & body";
-    $("s3status").className = "status " + (tplOk ? "ok" : "");
+    $("#subj").textContent = m.subject || "(no subject)";
+    if (document.activeElement !== $("#to")) $("#to").value = to;
+    $("#to").disabled = false;
+    const d = toL && c.drafted[toL], s = toL && c.sent[toL];
+    let note;
+    if (S.err.has(k)) note = `<span class="err">${esc(S.err.get(k))}</span>`;
+    else if (m.missing.length) note = `<span class="warn">Missing: ${esc(m.missing.join(", "))}. Add the column, a campaign variable or a fallback like {{Field|default}}.</span>`;
+    else if (s) note = `<span class="ok">Sent ${new Date(s.at).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })}${s.count > 1 ? " (" + s.count + " times)" : ""}${s.manual ? ", marked by hand" : ""}.</span>`;
+    else if (d) note = `<span class="ok">Drafted in Gmail${d.count > 1 ? " " + d.count + " times" : ""}.</span> ${d.viewUrl ? `<a href="${esc(d.viewUrl)}" target="_blank" rel="noopener">Open the draft</a>` : ""}`;
+    else note = esc(secondaryOf(r)) + " · sheet row " + (r.i + 2);
+    $("#pnote").innerHTML = note;
+    ["#one", "#sendOne", "#cpTo", "#cpSubj", "#cpBody", "#markSent"].forEach((id) => { $(id).disabled = S.running && (id === "#one" || id === "#sendOne"); });
+    $("#one").textContent = d ? "Draft again" : "Draft this one";
+    $("#sendOne").textContent = s ? "Send again" : "Send now";
+    $("#frame").srcdoc = frameDoc(m);
+    document.querySelectorAll("#rows .row").forEach((el) => el.setAttribute("aria-current", String(el.dataset.k === k)));
   }
+
+  function renderEmpty() {
+    const m = compose(null);
+    $("#subj").textContent = m.subject || "—";
+    $("#to").value = ""; $("#to").disabled = true;
+    ["#one", "#sendOne", "#cpTo", "#cpSubj", "#cpBody", "#markSent"].forEach((id) => { $(id).disabled = true; });
+    $("#pnote").textContent = "Template preview with no client data. Upload a sheet to see each personalised email.";
+    $("#frame").srcdoc = frameDoc(m);
+  }
+
+  function renderSent() {
+    const c = camp();
+    const items = Object.keys(c.sent).map((e) => Object.assign({ email: e }, c.sent[e])).sort((a, b) => b.at - a.at);
+    $("#sentCount").textContent = items.length;
+    $("#sentList").innerHTML = items.length ? items.map((x) => `<div class="row"><span style="min-width:0"><b>${esc(x.title || x.email)}</b><small>${esc(x.email)} · ${new Date(x.at).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })}${x.manual ? " · marked by hand" : ""}</small></span><span class="pill done">${x.count > 1 ? "Sent ×" + x.count : "Sent"}</span></div>`).join("")
+      : '<p class="note" style="padding:8px">Nothing has been sent in this campaign yet.</p>';
+  }
+
+  let raf = false, soonT;
+  function refresh() {
+    if (raf) return; raf = true;
+    requestAnimationFrame(() => {
+      raf = false; S.memo = null;
+      renderTagBar(); renderRows(); renderAccount();
+      if (S.cur && recByKey(S.cur)) show(S.cur); else renderEmpty();
+    });
+  }
+  function refreshSoon() { clearTimeout(soonT); soonT = setTimeout(refresh, 250); }
 
   /* =========================================================
-     4. SENDING
+     GMAIL API
      ========================================================= */
-  function buildQueue() {
-    const sup = suppressionSet(); const log = sentLog();
-    const skipMissing = $("skipMissing").checked, skipSent = $("skipSent").checked;
-    const q = [], skipped = { missing: 0, sent: 0, suppressed: 0 };
-    S.recs.forEach((r) => {
-      if (!S.selected.has(r.i) || !r.valid || r.dup) return;
-      if (sup.has(r.email)) { skipped.suppressed++; return; }
-      if (skipSent && log[r.email]) { skipped.sent++; return; }
-      if (skipMissing && missingFor(r).length) { skipped.missing++; return; }
-      q.push(r);
-    });
-    return { q, skipped };
-  }
-
-  function renderSummary() {
-    $("sentToday").value = S.email ? dailyCount() + " / " + settings.dailyLimit : "—";
-    if (!S.recs.length) { $("sendSummary").innerHTML = "Upload a spreadsheet to see who will be emailed."; return; }
-    const { q, skipped } = buildQueue();
-    const left = Math.max(0, settings.dailyLimit - dailyCount());
-    const n = Math.min(q.length, left);
-    const avg = (Number(settings.delayMin) + Number(settings.delayMax)) / 2;
-    let s = `<div class="big">${q.length} email${q.length === 1 ? "" : "s"} ready</div>`;
-    const bits = [];
-    if (skipped.sent) bits.push(`${skipped.sent} already emailed`);
-    if (skipped.missing) bits.push(`${skipped.missing} missing merge fields`);
-    if (skipped.suppressed) bits.push(`${skipped.suppressed} on your do-not-email list`);
-    if (bits.length) s += `<div>Skipping ${bits.join(", ")}.</div>`;
-    if (q.length) s += `<div>From <b>${esc(senderEmail() || "your Gmail")}</b> · about <b>${fmtDur(n * avg)}</b> at ${settings.delayMin}–${settings.delayMax}s apart.</div>`;
-    if (q.length > left) s += `<div>Your daily limit allows <b>${left}</b> more today; the rest can be sent tomorrow (they'll be skipped as already sent only once they go).</div>`;
-    $("sendSummary").innerHTML = s;
-    $("s4status").textContent = S.sending ? (S.paused ? "Paused" : "Sending…") : "";
-  }
-
-  async function gmailSend(raw) {
-    const res = await fetch(GMAIL + "/messages/send", {
-      method: "POST",
-      headers: { Authorization: "Bearer " + S.token, "Content-Type": "application/json" },
-      body: JSON.stringify({ raw })
-    });
+  async function gmailPost(path, payload) {
+    const res = await fetch(GMAIL + path, { method: "POST", headers: { Authorization: "Bearer " + S.token, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     let body = null; try { body = await res.json(); } catch (e) {}
-    if (res.ok) return body;
-    const msg = (body && body.error && body.error.message) || res.statusText || "HTTP " + res.status;
+    if (res.ok) return body || {};
+    const e = new Error((body && body.error && body.error.message) || res.statusText || "HTTP " + res.status);
+    e.status = res.status;
     const reason = body && body.error && body.error.errors && body.error.errors[0] && body.error.errors[0].reason;
-    const err = new Error(msg); err.status = res.status; err.reason = reason;
-    err.auth = res.status === 401;
-    err.rate = res.status === 429 || /rateLimit|quota|dailyLimit|userRateLimit/i.test(reason || "") || /limit exceeded/i.test(msg);
-    throw err;
+    e.retryable = res.status >= 500 || res.status === 429 || /rateLimitExceeded|backendError/i.test(reason || "");
+    e.daily = /dailyLimitExceeded|quotaExceeded/i.test(reason || "") || /daily.*limit|sending limit/i.test(e.message);
+    throw e;
   }
 
-  function mimeFor(r, m, opts) {
+  function rawFor(r, m) {
     return C.toBase64Url(C.buildMime({
-      fromName: settings.senderName || S.googleName || "",
-      fromEmail: senderEmail(),
-      to: r.email, toName: r.name || "",
-      replyTo: settings.replyTo || "",
-      subject: (opts && opts.subjectPrefix ? opts.subjectPrefix : "") + m.subject,
-      html: m.html, text: m.text,
-      unsubscribeMailto: $("listUnsub").checked ? (settings.replyTo || senderEmail()) : ""
+      fromName: settings.senderName || S.googleName || "", fromEmail: senderEmail(),
+      to: toOf(r), toName: nameOf(r), replyTo: settings.replyTo || "",
+      subject: m.subject, html: m.html, text: m.text,
+      unsubscribeMailto: settings.listUnsub ? (settings.replyTo || senderEmail()) : ""
     }));
   }
 
-  async function sendTest() {
-    if (!tokenValid(30000)) { toast("Connect Gmail first.", true); return; }
-    const r0 = previewRecs()[S.previewPos];
-    const m = compose(r0 || null);
-    if (!m.subject) { toast("Add a subject first.", true); return; }
-    const r = { email: S.email, name: "" };
-    $("testBtn").disabled = true;
-    try {
-      await gmailSend(mimeFor(r, m, { subjectPrefix: "[TEST] " }));
-      bumpDaily();
-      toast("Test sent to " + S.email + (r0 ? " (personalised for " + r0.email + ")" : ""));
-    } catch (e) { toast("Test failed: " + e.message, true); }
-    $("testBtn").disabled = false; renderSummary();
-  }
-
-  function askConfirm(title, bodyHtml, okLabel) {
-    return new Promise((resolve) => {
-      const d = $("confirmDialog");
-      $("confirmTitle").textContent = title; $("confirmBody").innerHTML = bodyHtml; $("confirmOk").textContent = okLabel || "OK";
-      d.returnValue = "";
-      d.addEventListener("close", function h() { d.removeEventListener("close", h); resolve(d.returnValue === "ok"); });
-      d.showModal();
-    });
-  }
-
-  async function startSending() {
-    if (S.sending) return;
-    if (!tokenValid(60000)) { toast("Connect Gmail first.", true); connect(); return; }
-    const { q } = buildQueue();
-    if (!q.length) { toast("Nobody to email. Check your selection and the summary above.", true); return; }
-    const left = settings.dailyLimit - dailyCount();
-    if (left <= 0) { toast("Daily limit reached for this account. Try again tomorrow or raise the limit carefully.", true); return; }
-    const n = Math.min(q.length, left);
-    const avg = (Number(settings.delayMin) + Number(settings.delayMax)) / 2;
-    const ok = await askConfirm("Send " + n + " email" + (n === 1 ? "" : "s") + "?",
-      `<p>From <b>${esc(senderEmail())}</b>${settings.senderName ? " as “" + esc(settings.senderName) + "”" : ""}.</p>
-       <p>Subject for the first recipient: <b>${esc(compose(q[0]).subject)}</b></p>
-       <p class="tiny">Estimated time: ${fmtDur(n * avg)}. Keep this tab open. You can pause or stop at any time.</p>
-       <p class="tiny">Tip: send yourself a test first and check it on your phone.</p>`, "Start sending");
-    if (!ok) return;
-
-    S.sending = true; S.paused = false; S.stop = false;
-    $("resultsWrap").classList.remove("hidden");
-    $("progressWrap").classList.remove("hidden");
-    updateSendButtons(); lockEditing(true);
-    let done = 0, sent = 0, failed = 0;
-
-    for (const r of q.slice(0, n)) {
-      if (S.stop) break;
-      while (S.paused && !S.stop) { await sleep(300); }
-      if (S.stop) break;
-      if (!tokenValid(90000)) {
-        S.paused = true; S.waitingAuth = true; updateSendButtons(); renderAccount();
-        toast("Your Google session is about to expire. Click “Reconnect to continue sending”.", true);
-        while (S.paused && !S.stop) { await sleep(300); }
-        if (S.stop) break;
-      }
-      if (dailyCount() >= settings.dailyLimit) { toast("Daily limit reached. Stopping.", true); break; }
-
-      const m = compose(r);
-      let status = "sent", detail = "";
-      try {
-        const res = await gmailSend(mimeFor(r, m));
-        markSent(r.email, { at: new Date().toISOString(), id: res && res.id });
-        bumpDaily(); sent++; detail = res && res.id ? "Gmail id " + res.id : "";
-      } catch (e) {
-        status = "failed"; detail = e.message; failed++;
-        if (e.auth) { S.paused = true; S.waitingAuth = true; S.token = null; renderAccount(); updateSendButtons(); toast("Google signed you out. Reconnect to continue.", true); }
-        else if (e.rate) { S.paused = true; updateSendButtons(); toast("Gmail says you're sending too fast or hit a limit: " + e.message + ". Paused.", true); }
-      }
-      S.results.push({ time: new Date().toLocaleString(), email: r.email, name: r.name || "", subject: m.subject, status, detail, row: r.i + 2 });
-      done++;
-      renderResults();
-      $("progressBar").style.width = (100 * done / n).toFixed(1) + "%";
-      $("progressText").textContent = `${sent} sent · ${failed} failed · ${n - done} to go`;
-      renderContacts(); renderSummary();
-      if (status === "failed" && (S.waitingAuth || S.paused)) {
-        // retry this one after reconnect / resume
-        while (S.paused && !S.stop) { await sleep(300); }
-        if (S.stop) break;
-        try {
-          const res = await gmailSend(mimeFor(r, m));
-          markSent(r.email, { at: new Date().toISOString(), id: res && res.id }); bumpDaily(); sent++; failed--;
-          const last = S.results[S.results.length - 1]; last.status = "sent"; last.detail = "Sent on retry";
-          renderResults();
-        } catch (e2) { /* stays failed */ }
-      }
-      if (done < n && !S.stop) {
-        const wait = Number(settings.delayMin) + Math.random() * Math.max(0, Number(settings.delayMax) - Number(settings.delayMin));
-        const end = Date.now() + wait * 1000;
-        while (Date.now() < end && !S.stop) {
-          if (!S.paused) $("progressText").textContent = `${sent} sent · ${failed} failed · ${n - done} to go · next in ${Math.ceil((end - Date.now()) / 1000)}s`;
-          await sleep(250);
-          if (S.paused) { while (S.paused && !S.stop) await sleep(300); }
-        }
+  /* Retries server errors and rate limits; waits for reconnect on expired sessions. */
+  async function withRetry(label, fn) {
+    for (let i = 0; ; i++) {
+      if (!tokenValid(60000)) await waitForAuth();
+      try { return await fn(); }
+      catch (e) {
+        if (e.status === 401) { S.token = null; await waitForAuth(); continue; }
+        if (!e.retryable || e.daily || i >= 3) throw e;
+        for (let s = 30 * (i + 1); s > 0 && !S.stop; s--) { setStatus(`<span class="warn">Gmail is busy (${esc(e.message)}). Retrying ${esc(label)} in ${s}s… (attempt ${i + 2} of 4)</span>`); await sleep(1000); }
+        if (S.stop) throw e;
       }
     }
-    S.sending = false; S.paused = false; S.waitingAuth = false;
-    updateSendButtons(); lockEditing(false); renderAccount();
-    $("progressText").textContent = `Finished: ${sent} sent · ${failed} failed${S.stop ? " · stopped early" : ""}.`;
-    toast(`Done. ${sent} sent${failed ? ", " + failed + " failed" : ""}.`, failed > 0);
-    refreshAll();
   }
 
-  function updateSendButtons() {
-    $("sendBtn").classList.toggle("hidden", S.sending);
-    $("testBtn").disabled = S.sending;
-    $("pauseBtn").classList.toggle("hidden", !S.sending);
-    $("stopBtn").classList.toggle("hidden", !S.sending);
-    $("pauseBtn").textContent = S.paused ? "Resume" : "Pause";
-    $("pauseBtn").disabled = S.waitingAuth;
-    $("s4status").textContent = S.sending ? (S.paused ? "Paused" : "Sending…") : "";
+  function checkSendable(r, needAddress) {
+    const to = toOf(r).toLowerCase();
+    if (needAddress && !validEmail(to)) return "Add a valid email address first.";
+    if (to && !validEmail(to)) return "That address doesn’t look right. Fix it or clear it.";
+    if (to && suppressed().has(to)) return "This address is on your do-not-email list (Settings).";
+    const miss = compose(r).missing;
+    if (miss.length) return "Missing: " + miss.join(", ") + ".";
+    return "";
   }
 
-  function lockEditing(lock) {
-    ["fileInput", "sheetSelect", "emailColSelect", "nameColSelect", "templateSelect", "subject", "htmlBody", "textBody", "sendHtml", "campaignName", "selectAllBtn", "selectNoneBtn"]
-      .forEach((id) => { $(id).disabled = lock; });
-    document.querySelectorAll("#varsList input, #varsList textarea, #contactTable input").forEach((el) => { el.disabled = lock; });
+  async function draftOne(r) {
+    const m = compose(r);
+    const res = await withRetry(titleOf(r), () => gmailPost("/drafts", { message: { raw: rawFor(r, m) } }));
+    const c = camp(); const to = toOf(r, c).toLowerCase();
+    if (!to) return;
+    const msgId = res.message && res.message.id;
+    const prev = c.drafted[to];
+    c.drafted[to] = { at: Date.now(), title: titleOf(r), draftId: res.id || "", count: ((prev && prev.count) || 0) + 1,
+      viewUrl: "https://mail.google.com/mail/?authuser=" + encodeURIComponent(S.email) + "#drafts" + (msgId ? "?compose=" + msgId : "") };
+    saveCamp(c);
   }
 
-  function renderResults() {
-    const t = $("resultsTable");
-    t.innerHTML = "<thead><tr><th>Time</th><th>Row</th><th>Email</th><th>Status</th><th>Detail</th></tr></thead><tbody>" +
-      S.results.slice().reverse().map((r) => `<tr><td>${esc(r.time)}</td><td>${r.row}</td><td>${esc(r.email)}</td><td><span class="badge ${r.status === "sent" ? "b-ok" : "b-bad"}">${r.status}</span></td><td title="${esc(r.detail)}">${esc(r.detail)}</td></tr>`).join("") +
-      "</tbody>";
+  async function sendOne(r) {
+    const m = compose(r);
+    const res = await withRetry(titleOf(r), () => gmailPost("/messages/send", { raw: rawFor(r, m) }));
+    const c = camp(); const to = toOf(r, c).toLowerCase();
+    const prev = c.sent[to];
+    c.sent[to] = { at: Date.now(), title: titleOf(r), id: res.id || "", count: ((prev && prev.count) || 0) + 1 };
+    saveCamp(c); bumpDaily();
   }
 
-  function exportResults(kind) {
-    if (!S.results.length) { toast("No results yet."); return; }
-    const ws = XLSX.utils.json_to_sheet(S.results);
-    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Results");
-    const base = "outreach-results-" + today();
-    XLSX.writeFile(wb, base + (kind === "csv" ? ".csv" : ".xlsx"), kind === "csv" ? { bookType: "csv" } : {});
+  async function runDrafts(keys) {
+    if (S.running) return;
+    S.running = true; S.runKind = "draft"; S.stop = false; counts();
+    let ok = 0, fail = 0;
+    for (const k of keys) {
+      const r = recByKey(k); if (!r) continue;
+      const bad = checkSendable(r, false);
+      if (bad) { S.err.set(k, bad); fail++; continue; }
+      S.busy.add(k); renderRows(); setStatus(`Creating draft ${ok + fail + 1} of ${keys.length}: ${esc(titleOf(r))}…`);
+      try { await draftOne(r); ok++; S.sel.delete(k); S.err.delete(k); }
+      catch (e) { fail++; S.err.set(k, "Gmail didn’t accept this draft: " + e.message); if (e.status === 403) { S.busy.delete(k); break; } }
+      S.busy.delete(k); renderRows(); if (S.cur === k) show(k);
+      await sleep(300);
+    }
+    S.running = false; S.runKind = null; counts();
+    setStatus(`${ok ? `<span class="ok">${ok} draft${ok === 1 ? "" : "s"} created in Gmail.</span> ` : ""}${fail ? `<span class="err">${fail} not drafted (see the red notes).</span> ` : ""}Nothing has been sent. Open Gmail → Drafts to review and send.`);
+    refresh();
+  }
+
+  async function runSend(keys) {
+    if (S.running) return;
+    S.running = true; S.runKind = "send"; S.stop = false; counts();
+    $("#progressWrap").hidden = false; $("#progressBar").style.width = "0%";
+    let ok = 0, fail = 0, done = 0, lastErr = "";
+    for (const k of keys) {
+      if (S.stop) break;
+      const r = recByKey(k); if (!r) continue;
+      if (dailyCount() >= settings.dailyLimit) { lastErr = `daily limit of ${settings.dailyLimit} reached (change it in Settings)`; break; }
+      const bad = checkSendable(r, true);
+      if (bad) { S.err.set(k, bad); fail++; done++; continue; }
+      S.sending.add(k); renderRows(); if (S.cur === k) show(k);
+      setStatus(`Sending ${done + 1} of ${keys.length}: ${esc(titleOf(r))}…`);
+      try { await sendOne(r); ok++; S.sel.delete(k); S.err.delete(k); }
+      catch (e) {
+        fail++; lastErr = e.message; S.err.set(k, "Gmail didn’t send this email: " + e.message);
+        if (e.daily || e.status === 403) { S.sending.delete(k); done++; break; }
+      }
+      S.sending.delete(k); done++;
+      $("#progressBar").style.width = (100 * done / keys.length).toFixed(1) + "%";
+      renderRows(); if (S.cur === k) show(k);
+      if (done < keys.length && !S.stop) {
+        const wait = Number(settings.delayMin) + Math.random() * Math.max(0, settings.delayMax - settings.delayMin);
+        const end = Date.now() + wait * 1000;
+        while (Date.now() < end && !S.stop) { setStatus(`${ok} sent${fail ? ", " + fail + " failed" : ""} · next email in ${Math.ceil((end - Date.now()) / 1000)}s · keep this page open`); await sleep(250); }
+      }
+    }
+    const stopped = S.stop;
+    S.running = false; S.runKind = null; S.stop = false; counts();
+    $("#progressWrap").hidden = true;
+    setStatus(`${ok ? `<span class="ok">${ok} email${ok === 1 ? "" : "s"} sent from ${esc(senderEmail())}.</span> ` : ""}${fail ? `<span class="err">${fail} not sent.</span> ` : ""}${lastErr ? `<span class="err">Last error: ${esc(lastErr)}.</span> ` : ""}${stopped ? "Stopped by you." : ""}`);
+    refresh();
+  }
+
+  /* ---------------- confirm bar ---------------- */
+  function askConfirm(msg, yesLabel, fn) {
+    const box = $("#confirm");
+    $("#confirmMsg").textContent = msg; $("#confirmYes").textContent = yesLabel || "Yes, send now";
+    box.hidden = false; box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    $("#confirmYes").onclick = () => { box.hidden = true; fn(); };
+    $("#confirmNo").onclick = () => { box.hidden = true; };
+  }
+
+  /* =========================================================
+     COPY / MARK SENT
+     ========================================================= */
+  async function copyText(txt, html) {
+    try {
+      if (html && window.ClipboardItem && navigator.clipboard.write) {
+        await navigator.clipboard.write([new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([txt], { type: "text/plain" }) })]);
+        return "Copied with the design. Paste into a new Gmail message.";
+      }
+      await navigator.clipboard.writeText(txt); return "Copied.";
+    } catch (e) {
+      const ta = document.createElement("textarea"); ta.value = txt; document.body.appendChild(ta); ta.select();
+      let ok = false; try { ok = document.execCommand("copy"); } catch (_) {} ta.remove();
+      return ok ? "Copied (plain text)." : "Your browser blocked copying. Select the text in the preview instead.";
+    }
   }
 
   /* =========================================================
      SETTINGS
      ========================================================= */
-  function openSettings(focusClientId) {
-    $("senderName").value = settings.senderName; $("fromAlias").value = settings.fromAlias;
-    $("replyTo").value = settings.replyTo; $("suppression").value = settings.suppression;
-    $("clientIdInput").value = settings.clientId; $("originHint").textContent = location.origin;
-    $("settingsDialog").showModal();
-    if (focusClientId) { $("clientIdInput").closest("details").open = true; $("clientIdInput").focus(); }
+  function openSettings(advanced) {
+    $("#senderName").value = settings.senderName; $("#fromAlias").value = settings.fromAlias; $("#replyTo").value = settings.replyTo;
+    $("#delayMin").value = settings.delayMin; $("#delayMax").value = settings.delayMax; $("#dailyLimit").value = settings.dailyLimit;
+    $("#listUnsub").checked = !!settings.listUnsub; $("#suppression").value = settings.suppression;
+    $("#clientIdInput").value = settings.clientId; $("#originHint").textContent = location.origin;
+    $("#sentTodayNote").textContent = S.email ? dailyCount() + " sent today from " + S.email + "." : "Gmail’s own cap is about 500/day (personal) or 2,000 (Workspace). For cold outreach stay far below.";
+    const d = $("#settingsDialog"); d.returnValue = ""; d.showModal();
+    if (advanced) { $("#clientIdInput").closest("details").open = true; $("#clientIdInput").focus(); }
   }
-  $("settingsDialog").addEventListener("close", () => {
-    if ($("settingsDialog").returnValue !== "save") return;
-    settings.senderName = $("senderName").value.trim();
-    settings.fromAlias = $("fromAlias").value.trim();
-    settings.replyTo = $("replyTo").value.trim();
-    settings.suppression = $("suppression").value;
-    const newCid = $("clientIdInput").value.trim();
-    if (newCid !== settings.clientId) { settings.clientId = newCid; S.tokenClient = null; }
-    saveSettings(); renderAccount(); refreshAll(); toast("Settings saved");
+  $("#settingsDialog").addEventListener("close", () => {
+    if ($("#settingsDialog").returnValue !== "save") return;
+    settings.senderName = $("#senderName").value.trim(); settings.fromAlias = $("#fromAlias").value.trim(); settings.replyTo = $("#replyTo").value.trim();
+    settings.delayMin = Math.max(5, Math.round(+$("#delayMin").value || 25));
+    settings.delayMax = Math.max(settings.delayMin, Math.round(+$("#delayMax").value || settings.delayMin));
+    settings.dailyLimit = Math.max(1, Math.round(+$("#dailyLimit").value || 100));
+    settings.listUnsub = $("#listUnsub").checked; settings.suppression = $("#suppression").value;
+    const cid = $("#clientIdInput").value.trim(); if (cid !== settings.clientId) { settings.clientId = cid; S.tokenClient = null; }
+    saveSettings(); refresh(); setStatus('<span class="ok">Settings saved.</span>');
   });
 
   /* =========================================================
      WIRING
      ========================================================= */
-  let rafPending = false, debounceT;
-  function refreshAll() {
-    if (rafPending) return; rafPending = true;
-    requestAnimationFrame(() => { rafPending = false; S.memo = null; renderTagBar(); renderContacts(); renderPreview(); renderSummary(); });
-  }
-  function refreshAllDebounced() { clearTimeout(debounceT); debounceT = setTimeout(refreshAll, 250); }
-
-  $("connectBtn").onclick = connect;
-  $("disconnectBtn").onclick = disconnect;
-  $("settingsBtn").onclick = () => openSettings(false);
-
-  const dz = $("dropZone");
-  $("fileInput").onchange = (e) => { if (e.target.files[0]) readFile(e.target.files[0]); e.target.value = ""; };
-  ["dragenter", "dragover"].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add("over"); }));
-  ["dragleave", "drop"].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove("over"); }));
-  dz.addEventListener("drop", (e) => { if (S.sending) return; const f = e.dataTransfer.files[0]; if (f) readFile(f); });
-
-  $("sheetSelect").onchange = (e) => loadSheet(e.target.value);
-  $("emailColSelect").onchange = (e) => { S.emailCol = e.target.value; rebuildRecs(true); };
-  $("nameColSelect").onchange = (e) => { S.nameCol = e.target.value; rebuildRecs(false); };
-  $("contactSearch").oninput = (e) => { S.filter = e.target.value; renderContacts(); };
-  $("selectAllBtn").onclick = () => { const sup = suppressionSet(); S.selected = new Set(S.recs.filter((r) => r.valid && !r.dup && !sup.has(r.email)).map((r) => r.i)); refreshAll(); };
-  $("selectNoneBtn").onclick = () => { S.selected = new Set(); refreshAll(); };
-  $("contactTable").addEventListener("click", (e) => {
-    const tr = e.target.closest("tr[data-i]"); if (!tr) return;
-    const i = Number(tr.dataset.i);
-    if (e.target.matches("input[type=checkbox]")) {
-      if (S.sending) { e.preventDefault(); return; }
-      e.target.checked ? S.selected.add(i) : S.selected.delete(i);
-    } else {
-      const pos = previewRecs().findIndex((r) => r.i === i);
-      if (pos >= 0) S.previewPos = pos; else toast("That row isn't selected, so it won't be sent.");
-    }
-    refreshAll();
-  });
-
-  $("prevBtn").onclick = () => { const n = previewRecs().length; if (n) { S.previewPos = (S.previewPos - 1 + n) % n; refreshAll(); } };
-  $("nextBtn").onclick = () => { const n = previewRecs().length; if (n) { S.previewPos = (S.previewPos + 1) % n; refreshAll(); } };
-
-  $("templateSelect").onchange = (e) => {
-    const t = allTemplates().find((x) => x.id === e.target.value);
-    if (t) applyTemplate(t);
-    $("deleteTemplateBtn").disabled = !(t && t.mine);
+  $("#connectBtn").onclick = () => { requestToken(SEND_SCOPE).catch(() => {}); };
+  $("#disconnectBtn").onclick = () => {
+    if (S.running) { setStatus('<span class="err">Stop sending first.</span>'); return; }
+    if (S.token && gisReady()) google.accounts.oauth2.revoke(S.token, () => {});
+    S.token = null; S.tokenExp = 0; S.email = ""; S.googleName = ""; S.scopes = new Set();
+    setStatus("Disconnected from Gmail."); refresh();
   };
-  $("saveTemplateBtn").onclick = async () => {
-    const cur = allTemplates().find((t) => t.id === $("templateSelect").value);
-    const suggested = cur && cur.mine ? cur.name : (cur ? "My " + cur.name : "My template");
-    const ok = await askConfirm("Save template", `<label class="field"><span>Name</span><input id="tplNameInput" type="text" value="${esc(suggested)}"></label>`, "Save");
-    if (!ok) return;
-    const name = (document.getElementById("tplNameInput").value || "").trim() || suggested;
+  $("#settingsBtn").onclick = () => openSettings(false);
+
+  $("#fileInput").onchange = (e) => { if (e.target.files[0]) readFile(e.target.files[0]); e.target.value = ""; };
+  const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+  ["dragenter", "dragover"].forEach((ev) => document.addEventListener(ev, (e) => { if (hasFiles(e)) { e.preventDefault(); $(".list").classList.add("over"); } }));
+  document.addEventListener("dragleave", (e) => { if (!e.relatedTarget) $(".list").classList.remove("over"); });
+  document.addEventListener("drop", (e) => { $(".list").classList.remove("over"); if (!hasFiles(e)) return; e.preventDefault(); if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]); });
+
+  $("#tab").onchange = (e) => loadSheet(e.target.value);
+  $("#emailColSelect").onchange = (e) => { S.emailCol = e.target.value; refresh(); };
+  $("#titleColSelect").onchange = (e) => { S.titleCol = e.target.value; refresh(); };
+  $("#nameColSelect").onchange = (e) => { S.nameCol = e.target.value; refresh(); };
+  $("#q").oninput = renderRows;
+  $("#style").value = settings.style;
+  $("#style").onchange = (e) => { settings.style = e.target.value; saveSettings(); refresh(); };
+
+  $("#rows").addEventListener("click", (e) => {
+    const el = e.target.closest(".row[data-k]"); if (!el) return;
+    const k = el.dataset.k;
+    if (e.target.matches("input[type=checkbox]")) { e.target.checked ? S.sel.add(k) : S.sel.delete(k); counts(); return; }
+    show(k);
+  });
+  $("#selAll").onclick = () => {
+    const c = camp(), sup = suppressed(), seen = new Set();
+    S.recs.forEach((r) => {
+      const to = toOf(r, c).toLowerCase();
+      if (validEmail(to) && !c.sent[to] && !sup.has(to) && !seen.has(to)) S.sel.add(r.key);
+      if (to) seen.add(to);
+    });
+    renderRows();
+  };
+  $("#selNone").onclick = () => { S.sel.clear(); renderRows(); };
+
+  $("#to").oninput = (e) => { const r = recByKey(S.cur); if (!r) return; const c = camp(); c.to[r.key] = e.target.value.trim(); saveCamp(c); };
+  $("#to").onchange = () => { S.err.delete(S.cur); refresh(); };
+
+  $("#pasteGo").onclick = () => {
+    let n = 0; const miss = []; const c = camp();
+    $("#paste").value.split(/\n+/).forEach((line) => {
+      const m = line.match(/^(.*?)[,\t;|]\s*([^\s,;|]+@[^\s,;|]+)\s*$/); if (!m) return;
+      const name = m[1].trim().toLowerCase();
+      const labels = (r) => [titleOf(r), nameOf(r)].map((x) => String(x || "").toLowerCase());
+      const r = S.recs.find((x) => labels(x).includes(name)) || S.recs.find((x) => labels(x).some((l) => l && (l.includes(name) || name.includes(l))));
+      if (r && validEmail(m[2])) { c.to[r.key] = m[2].trim(); n++; } else miss.push(m[1].trim());
+    });
+    saveCamp(c);
+    $("#pasteNote").textContent = `${n} address${n === 1 ? "" : "es"} added.` + (miss.length ? ` Couldn’t match: ${miss.join(", ")}.` : "");
+    refresh();
+  };
+
+  // Drafts need the extra "manage drafts" permission, asked for only when first used.
+  function startDrafts(keys) { ensureScope(COMPOSE_SCOPE).then(() => runDrafts(keys)).catch(() => {}); }
+  $("#make").onclick = () => { if (S.sel.size) startDrafts(S.recs.filter((r) => S.sel.has(r.key)).map((r) => r.key)); };
+  $("#one").onclick = () => { if (S.cur) startDrafts([S.cur]); };
+
+  $("#sendOne").onclick = () => {
+    const r = recByKey(S.cur); if (!r) return;
+    const bad = checkSendable(r, true);
+    if (bad) { $("#pnote").innerHTML = `<span class="err">${esc(bad)}</span>`; return; }
+    askConfirm(`Send the ${titleOf(r)} email to ${toOf(r)} now${senderEmail() ? " from " + senderEmail() : ""}?`, "Yes, send now",
+      () => ensureScope(SEND_SCOPE).then(() => runSend([r.key])).catch(() => {}));
+  };
+  $("#sendSel").onclick = () => {
+    if (S.running && S.runKind === "send") { S.stop = true; setStatus("Stopping…"); return; }
+    const keys = S.recs.filter((r) => S.sel.has(r.key)).map((r) => r.key);
+    const problems = keys.filter((k) => checkSendable(recByKey(k), true));
+    if (problems.length) {
+      problems.forEach((k) => S.err.set(k, checkSendable(recByKey(k), true)));
+      setStatus(`<span class="err">${problems.length} selected ${problems.length === 1 ? "has" : "have"} no valid address or missing details (marked Failed). Fix ${problems.length === 1 ? "it" : "them"} or untick ${problems.length === 1 ? "it" : "them"}.</span>`);
+      renderRows(); return;
+    }
+    const left = settings.dailyLimit - dailyCount();
+    const avg = (settings.delayMin + settings.delayMax) / 2;
+    const n = Math.min(keys.length, Math.max(0, left));
+    if (!n) { setStatus(`<span class="err">You’ve reached today’s limit of ${settings.dailyLimit} for this account. Change it in Settings if you’re sure.</span>`); return; }
+    askConfirm(`Send ${keys.length} email${keys.length === 1 ? "" : "s"} now${senderEmail() ? " from " + senderEmail() : ""}? They go out one every ${settings.delayMin}–${settings.delayMax} seconds (about ${Math.max(1, Math.ceil(n * avg / 60))} min), so keep this page open until it finishes.${n < keys.length ? ` Only ${n} fit in today’s limit; the rest stay selected for tomorrow.` : ""}`,
+      "Yes, send now", () => ensureScope(SEND_SCOPE).then(() => runSend(keys)).catch(() => {}));
+  };
+
+  const curRec = () => recByKey(S.cur);
+  $("#cpTo").onclick = async () => { const r = curRec(); if (r) $("#cpNote").textContent = await copyText(toOf(r)); };
+  $("#cpSubj").onclick = async () => { const r = curRec(); if (r) $("#cpNote").textContent = await copyText(compose(r).subject); };
+  $("#cpBody").onclick = async () => { const r = curRec(); if (!r) return; const m = compose(r); $("#cpNote").textContent = await copyText(m.text, settings.style === "plain" ? null : m.html); };
+  $("#markSent").onclick = () => {
+    const r = curRec(); if (!r) return; const c = camp(); const to = toOf(r, c).toLowerCase();
+    if (!to) { $("#cpNote").textContent = "Add the address first."; return; }
+    const prev = c.sent[to]; c.sent[to] = { at: Date.now(), title: titleOf(r), count: ((prev && prev.count) || 0) + 1, manual: true };
+    saveCamp(c); $("#cpNote").textContent = "Marked as sent."; refresh();
+  };
+
+  function exportLog(kind) {
+    const c = camp(); const rows = [];
+    Object.keys(c.sent).forEach((e) => rows.push({ email: e, name: c.sent[e].title || "", status: c.sent[e].manual ? "sent (marked)" : "sent", times: c.sent[e].count || 1, at: new Date(c.sent[e].at).toISOString() }));
+    Object.keys(c.drafted).forEach((e) => rows.push({ email: e, name: c.drafted[e].title || "", status: "drafted", times: c.drafted[e].count || 1, at: new Date(c.drafted[e].at).toISOString() }));
+    if (!rows.length) { setStatus("Nothing in this campaign’s log yet."); return; }
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Log");
+    XLSX.writeFile(wb, "outreach-log-" + campaignName().replace(/[^\w-]+/g, "_") + (kind === "csv" ? ".csv" : ".xlsx"), kind === "csv" ? { bookType: "csv" } : {});
+  }
+  $("#exportXlsx").onclick = () => exportLog("xlsx");
+  $("#exportCsv").onclick = () => exportLog("csv");
+
+  // template editor
+  $("#templateSelect").onchange = (e) => { const t = allTemplates().find((x) => x.id === e.target.value); if (t) applyTemplate(t); renderTemplateSelect(e.target.value); };
+  $("#saveTemplateBtn").onclick = () => {
+    const cur = allTemplates().find((t) => t.id === $("#templateSelect").value);
+    const name = (window.prompt("Name this template", cur && cur.mine ? cur.name : (cur ? "My " + cur.name : "My template")) || "").trim();
+    if (!name) return;
     const mine = store.get("templates", []);
     let t = mine.find((x) => x.name === name);
     if (!t) { t = { id: "mine-" + Date.now().toString(36), name }; mine.push(t); }
-    Object.assign(t, { subject: $("subject").value, html: $("htmlBody").value, text: $("textBody").value, sendHtml: $("sendHtml").checked, variables: currentVars() });
-    store.set("templates", mine); renderTemplateSelect(t.id); saveDraft(); toast("Saved “" + name + "”");
+    Object.assign(t, { subject: $("#subject").value, html: $("#htmlBody").value, text: $("#textBody").value, variables: currentVars() });
+    store.set("templates", mine); renderTemplateSelect(t.id); saveDraft(); setStatus(`<span class="ok">Saved “${esc(name)}” in this browser.</span>`);
   };
-  $("deleteTemplateBtn").onclick = async () => {
-    const id = $("templateSelect").value;
-    const mine = store.get("templates", []); const t = mine.find((x) => x.id === id);
-    if (!t) return;
-    if (!(await askConfirm("Delete “" + t.name + "”?", "<p>This removes it from this browser.</p>", "Delete"))) return;
-    store.set("templates", mine.filter((x) => x.id !== id));
-    renderTemplateSelect(BUILTIN_TEMPLATES[0].id); applyTemplate(BUILTIN_TEMPLATES[0]);
-  };
-  $("importHtml").onchange = (e) => {
-    const f = e.target.files[0]; if (!f) return;
-    f.text().then((txt) => {
-      const m = txt.match(/<body[^>]*>([\s\S]*)<\/body>/i);
-      $("htmlBody").value = m ? m[1].trim() : txt; $("sendHtml").checked = true;
-      saveDraft(); refreshAll(); toast("Imported " + f.name);
+  $("#deleteTemplateBtn").onclick = () => {
+    const id = $("#templateSelect").value; const mine = store.get("templates", []); const t = mine.find((x) => x.id === id); if (!t) return;
+    askConfirm(`Delete your template “${t.name}”?`, "Delete", () => {
+      store.set("templates", mine.filter((x) => x.id !== id));
+      renderTemplateSelect(BUILTIN_TEMPLATES[0].id); applyTemplate(BUILTIN_TEMPLATES[0]);
     });
+  };
+  $("#importHtml").onchange = (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    f.text().then((txt) => { const m = txt.match(/<body[^>]*>([\s\S]*)<\/body>/i); $("#htmlBody").value = m ? m[1].trim() : txt; saveDraft(); refresh(); setStatus("Imported " + esc(f.name) + "."); });
     e.target.value = "";
   };
-
-  ["subject", "htmlBody", "textBody"].forEach((id) => {
+  ["#subject", "#htmlBody", "#textBody"].forEach((id) => {
     $(id).addEventListener("focus", () => { S.lastFocus = $(id); });
-    $(id).addEventListener("input", () => { saveDraft(); refreshAllDebounced(); });
+    $(id).addEventListener("input", () => { saveDraft(); refreshSoon(); });
   });
-  $("sendHtml").onchange = () => { saveDraft(); refreshAll(); };
-  $("campaignName").addEventListener("input", () => { saveDraft(); refreshAllDebounced(); });
-  $("tagBar").addEventListener("click", (e) => { const b = e.target.closest("[data-tag]"); if (b) insertTag(b.dataset.tag); });
-  $("addVarBtn").onclick = () => { addVarRow("", ""); $("varsList").lastChild.querySelector("input").focus(); };
-
+  $("#campaignName").addEventListener("input", () => { saveDraft(); refreshSoon(); });
+  $("#tagBar").addEventListener("click", (e) => { const b = e.target.closest("[data-tag]"); if (b) insertTag(b.dataset.tag); });
+  $("#addVarBtn").onclick = () => { addVarRow("", ""); $("#varsList").lastChild.querySelector("input").focus(); };
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.onclick = () => {
       document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
-      document.querySelectorAll(".tabpanel").forEach((p) => p.classList.toggle("hidden", p.dataset.panel !== tab.dataset.tab));
+      document.querySelectorAll(".tabpanel").forEach((p) => { p.hidden = p.dataset.panel !== tab.dataset.tab; });
     };
   });
 
-  function bindNum(id, key, min) {
-    $(id).value = settings[key];
-    $(id).addEventListener("change", () => {
-      let v = Math.max(min, Math.round(Number($(id).value) || min));
-      settings[key] = v; $(id).value = v;
-      if (Number(settings.delayMax) < Number(settings.delayMin)) { settings.delayMax = settings.delayMin; $("delayMax").value = settings.delayMax; }
-      saveSettings(); renderSummary();
-    });
-  }
-  bindNum("delayMin", "delayMin", 3); bindNum("delayMax", "delayMax", 3); bindNum("dailyLimit", "dailyLimit", 1);
-  ["skipMissing", "skipSent", "listUnsub"].forEach((id) => { $(id).onchange = refreshAll; });
+  $("#clearLogBtn").onclick = () => { $("#settingsDialog").close(); askConfirm(`Clear the sent and drafted log for “${campaignName()}”? Everyone could be emailed again.`, "Clear log", () => { store.del(campKey()); refresh(); }); };
+  $("#clearAllBtn").onclick = () => { $("#settingsDialog").close(); askConfirm("Erase settings, templates, logs and added addresses from this browser?", "Erase everything", () => { Object.keys(localStorage).filter((k) => k.startsWith("aco.")).forEach((k) => localStorage.removeItem(k)); location.reload(); }); };
 
-  $("testBtn").onclick = sendTest;
-  $("sendBtn").onclick = startSending;
-  $("pauseBtn").onclick = () => { S.paused = !S.paused; updateSendButtons(); };
-  $("stopBtn").onclick = () => { S.stop = true; S.paused = false; S.waitingAuth = false; updateSendButtons(); };
-  $("exportXlsx").onclick = () => exportResults("xlsx");
-  $("exportCsv").onclick = () => exportResults("csv");
-  $("clearLogBtn").onclick = async () => {
-    $("settingsDialog").close();
-    if (await askConfirm("Clear the sent log?", "<p>Everyone you've emailed could be emailed again in the same campaign. This can't be undone.</p>", "Clear log")) {
-      store.del("sent"); refreshAll(); toast("Sent log cleared");
-    }
-  };
-  $("clearAllBtn").onclick = async () => {
-    $("settingsDialog").close();
-    if (await askConfirm("Erase everything?", "<p>Removes settings, saved templates, the sent log and the do-not-email list from this browser.</p>", "Erase")) {
-      Object.keys(localStorage).filter((k) => k.startsWith("aco.")).forEach((k) => localStorage.removeItem(k));
-      location.reload();
-    }
-  };
-
-  window.addEventListener("beforeunload", (e) => { if (S.sending) { e.preventDefault(); e.returnValue = ""; } });
+  window.addEventListener("beforeunload", (e) => { if (S.running) { e.preventDefault(); e.returnValue = ""; } });
 
   /* ---------------- init ---------------- */
+  const draft = store.get("draft", null);
   renderTemplateSelect(draft && draft.templateId);
-  if (draft) {
-    $("campaignName").value = draft.campaign || "";
-    applyTemplate(draft);
-    renderTemplateSelect(draft.templateId);
-  } else {
-    applyTemplate(BUILTIN_TEMPLATES[0]);
-  }
-  renderAccount();
-  refreshAll();
+  if (draft) { $("#campaignName").value = draft.campaign || ""; applyTemplate(draft); renderTemplateSelect(draft.templateId); }
+  else applyTemplate(BUILTIN_TEMPLATES[0]);
+  if (!clientId()) setStatus('Upload your client list (Excel or CSV) to begin. <span class="warn">This site has no Google client ID yet, so Gmail can’t connect until one is added (Settings → Advanced, or config.js).</span>');
+  refresh();
 })();
