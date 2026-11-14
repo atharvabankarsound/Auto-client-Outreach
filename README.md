@@ -7,10 +7,12 @@ Upload an Excel or CSV list of clients, describe the email you want, add your lo
 ## How to use it
 
 1. **Upload your client sheet.** An Excel or CSV file with your clients' details and one column of email addresses (first row = column headings). Each sheet in the file becomes a list.
-2. **Describe the email.** Say who it's for, the headline, your opening line, what you offer and the button text. Columns from your sheet (`{{First Name}}`, `{{Company}}`…) are filled in for every client.
+2. **Describe the email.** Type a sentence or two about the email you want and click **Turn into a draft**. The AI writes the subject, headline, opening, services and offer into the chosen style, using your company details and the columns in your sheet (`{{First Name}}`, `{{Company}}`…). Add notes and click **Refine**, or fine-tune any field by hand.
 3. **Add your logo.** Drop a PNG, JPG, GIF, WebP or SVG into **Company Logo**. It appears in the email header and is embedded in each email (so it shows without "display images").
 4. **Give your company details.** Company name, email, phone number, website, header tagline, footer text and accent colour. They fill the header, buttons and footer.
 5. **Connect Gmail, preview and send.** Check the preview for a few clients, send yourself a test, then create drafts or send. Nothing goes out until you press Send and confirm.
+
+The AI step runs in the user's browser with their **own API key** (Google Gemini, which has a free tier, Anthropic or OpenAI), entered once under *AI settings* and kept in local storage. There is no server and no shared key, so the site costs its owner nothing to run.
 
 Advanced users can edit the HTML, plain-text version and every variable directly, import their own HTML email, and save templates for reuse.
 
@@ -103,6 +105,7 @@ config.js           Google client ID and defaults
 assets/app.js       UI, Gmail sign-in and sending
 assets/core.js      merge-field rendering, email parsing, MIME building (no DOM)
 assets/templates.js built-in templates (Designed, Simple, Blank)
+assets/ai.js        brief -> email fields via Gemini / Anthropic / OpenAI (browser-side, user's key)
 assets/styles.css
 privacy.html, terms.html
 sample-contacts.xlsx / .csv

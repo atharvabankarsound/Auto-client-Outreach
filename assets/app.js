@@ -25,8 +25,10 @@
     delayMin: (CFG.defaultDelaySeconds || [25, 45])[0], delayMax: (CFG.defaultDelaySeconds || [25, 45])[1],
     dailyLimit: CFG.defaultDailyLimit || 100, listUnsub: true,
     company: { name: "", email: "", phone: "", website: "", header: "", footer: "", accent: "#0071E3" },
-    logo: null, logoHeight: 56
+    logo: null, logoHeight: 56,
+    ai: { provider: "gemini", key: "", model: "" }
   }, store.get("settings", {}));
+  settings.ai = Object.assign({ provider: "gemini", key: "", model: "" }, settings.ai || {});
   settings.company = Object.assign({ name: "", email: "", phone: "", website: "", header: "", footer: "", accent: "#0071E3" }, settings.company || {});
   const saveSettings = () => store.set("settings", settings);
 
@@ -290,7 +292,7 @@
     $("#varsList").appendChild(d);
   }
   function saveDraft() {
-    store.set("draft", { templateId: $("#templateSelect").value, campaign: $("#campaignName").value, subject: $("#subject").value, html: $("#htmlBody").value, text: $("#textBody").value, variables: currentVars() });
+    store.set("draft", { brief: $("#aiBrief").value, templateId: $("#templateSelect").value, campaign: $("#campaignName").value, subject: $("#subject").value, html: $("#htmlBody").value, text: $("#textBody").value, variables: currentVars() });
   }
   function renderTagBar() {
     const vars = Object.keys(currentVars());
@@ -789,6 +791,49 @@
   $("#coAccent").oninput = (e) => { settings.company.accent = e.target.value; $("#coAccentText").value = e.target.value; saveSettings(); refreshSoon(); };
   $("#coAccentText").addEventListener("input", (e) => { const v = e.target.value.trim(); if (/^#[0-9a-f]{6}$/i.test(v)) { settings.company.accent = v; $("#coAccent").value = v; saveSettings(); refreshSoon(); } });
 
+  /* ---- AI: one text box -> draft ---- */
+  const AI = window.OutreachAI;
+  function aiFields() {
+    const cur = allTemplates().find((x) => x.id === $("#templateSelect").value) || BUILTIN_TEMPLATES[0];
+    const base = allTemplates().find((x) => x.id === (cur.baseId || cur.id)) || cur;
+    return base.fields || cur.fields || [];
+  }
+  function renderAiSettings() {
+    const P = AI.PROVIDERS[settings.ai.provider] || AI.PROVIDERS.gemini;
+    $("#aiProvider").value = settings.ai.provider; $("#aiKey").value = settings.ai.key;
+    $("#aiModel").value = settings.ai.model || ""; $("#aiModel").placeholder = P.defaultModel; $("#aiKeyHelp").innerHTML = P.help;
+    $("#aiRefine").hidden = !S.aiDrafted;
+  }
+  $("#aiProvider").onchange = (e) => { settings.ai.provider = e.target.value; settings.ai.model = ""; saveSettings(); renderAiSettings(); };
+  $("#aiKey").addEventListener("input", (e) => { settings.ai.key = e.target.value.trim(); saveSettings(); });
+  $("#aiModel").addEventListener("input", (e) => { settings.ai.model = e.target.value.trim(); saveSettings(); });
+  $("#aiBrief").addEventListener("input", saveDraft);
+  async function runAi(refine) {
+    const brief = $("#aiBrief").value.trim();
+    if (!brief) { $("#aiNote").innerHTML = '<span class="err">Describe the email first, even a sentence is enough.</span>'; $("#aiBrief").focus(); return; }
+    if (!settings.ai.key) { $("#aiBox").open = true; $("#aiKey").focus(); $("#aiNote").innerHTML = '<span class="err">Add an API key under AI settings (a free Gemini key works).</span>'; return; }
+    const fields = aiFields();
+    if (!fields.length) { $("#aiNote").innerHTML = '<span class="err">The Blank style has no fields to fill. Pick the Designed or Simple style, or write the HTML under Advanced.</span>'; return; }
+    $("#aiGo").disabled = true; $("#aiRefine").disabled = true; $("#aiNote").textContent = "Drafting…";
+    try {
+      const out = await AI.draft(settings.ai.provider, settings.ai.key, settings.ai.model, {
+        brief, fields, current: refine ? currentVars() : null, subject: $("#subject").value, previousBrief: refine,
+        columns: S.headers, company: settings.company, senderName: settings.senderName || S.googleName
+      });
+      if (out.subject) $("#subject").value = out.subject;
+      fields.forEach((f) => { if (out[f.key] != null) setVar(f.key, out[f.key]); });
+      syncDescribeFromVars(); saveDraft(); refresh();
+      S.aiDrafted = true; $("#aiRefine").hidden = false;
+      $("#aiNote").innerHTML = '<span class="ok">Draft ready. Check the preview on the right; add notes and click “Refine” to change it, or fine-tune any field below.</span>';
+    } catch (e) {
+      const msg = /Failed to fetch|NetworkError/i.test(e.message) ? "Couldn’t reach the AI provider. Check your connection, ad-blocker, or that the key is valid." : e.message;
+      $("#aiNote").innerHTML = '<span class="err">' + esc(msg) + "</span>";
+    }
+    $("#aiGo").disabled = false; $("#aiRefine").disabled = false;
+  }
+  $("#aiGo").onclick = () => runAi(false);
+  $("#aiRefine").onclick = () => runAi(true);
+
   /* ---- light / dark theme ---- */
   function applyTheme(t) { document.documentElement.setAttribute("data-theme", t); try { localStorage.setItem("aco.theme", t); } catch (e) {} $("#themeBtn").textContent = t === "dark" ? "☀" : "☾"; }
   $("#themeBtn").onclick = () => applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
@@ -802,6 +847,8 @@
   if (draft) { $("#campaignName").value = draft.campaign || ""; applyTemplate(Object.assign({ baseId: draft.templateId }, draft)); renderTemplateSelect(draft.templateId); }
   else applyTemplate(BUILTIN_TEMPLATES[0]);
   renderLogo(); renderCompany();
+  if (draft && draft.brief) $("#aiBrief").value = draft.brief;
+  renderAiSettings();
   if (!clientId()) setStatus('Start with step 1: upload your client sheet. <span class="warn">This site has no Google client ID yet, so Gmail can’t connect until one is added (Settings → Advanced, or config.js).</span>');
   refresh();
 })();
