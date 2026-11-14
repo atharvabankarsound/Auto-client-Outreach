@@ -18,13 +18,13 @@
       <div class="eyebrow">Auto Client Outreach</div>
       <h1>Outreach</h1>
       <p class="sub">Send personalised emails to your whole client list from your own Gmail. Here’s how to use it, step by step:</p>
-      <ol class="sub steps" style="margin-top:10px">
+      <ul class="sub steps" style="margin-top:10px">
         <li><b>Upload your Excel sheet</b> with your clients’ details (names, companies and their email addresses).</li>
         <li><b>State what kind of email you want to draft</b> in the <a href="#describe">Describe the Email</a> section: the subject, who it’s for, the headline, your opening line, what you offer and the button text.</li>
         <li><b>Upload your logo or banner</b> in the <a href="#logo">Company Logo</a> section. It goes at the top of every email.</li>
         <li><b>Give your company info</b> in the <a href="#company">Company Details</a> section: company email, phone number, website, and the header and footer details.</li>
         <li><b>Connect Gmail</b>, check the live preview, then create drafts or send. Nothing is sent until you press Send and confirm.</li>
-      </ol>
+      </ul>
     </div>
     <div class="account">
       <span id="accountPill" class="pill">Gmail not connected</span>
@@ -36,7 +36,7 @@
 
 
   <section class="bar block step" id="upload">
-    <h2><span class="num">1</span> Upload client sheet</h2>
+    <h2>Upload client sheet</h2>
     <div class="listpick">
       <label class="btn primary" for="fileInput">Upload Excel / CSV</label>
       <input type="file" id="fileInput" accept=".xlsx,.xls,.xlsm,.csv,.tsv,.ods" hidden>
@@ -47,7 +47,7 @@
   </section>
 
   <section class="bar block step" id="describe">
-    <h2><span class="num">2</span> Describe the Email</h2>
+    <h2>Describe the Email</h2>
     <div class="tplgrid">
       <label class="field"><span>Email style</span><select class="in" id="templateSelect"></select></label>
       <label class="field"><span>Campaign name <i>(keeps track of who’s been emailed)</i></span><input class="in" id="campaignName" type="text" placeholder="e.g. Spring outreach"></label>
@@ -91,7 +91,7 @@
 
   <div class="twocol">
     <section class="bar block step" id="logo">
-      <h2><span class="num">3</span> Company Logo</h2>
+      <h2>Company Logo</h2>
       <label class="logodrop" id="logoDrop" for="logoInput">
         <img id="logoPreview" alt="" hidden>
         <span id="logoText"><strong>Drop your logo or banner here</strong><br>PNG, JPG, GIF or SVG · shown in the email header · resized to 600px wide</span>
@@ -105,7 +105,7 @@
     </section>
 
     <section class="bar block step" id="company">
-      <h2><span class="num">4</span> Company Details</h2>
+      <h2>Company Details</h2>
       <div class="tplgrid">
         <label class="field"><span>Company name</span><input class="in" id="coName" type="text" placeholder="Example Studio"></label>
         <label class="field"><span>Accent colour</span><span class="inline"><input type="color" id="coAccent" value="#0071E3"><input class="in" id="coAccentText" type="text" value="#0071E3" style="width:110px"></span></label>
