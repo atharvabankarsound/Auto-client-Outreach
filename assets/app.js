@@ -197,7 +197,7 @@
     const missing = new Set();
     const ctx = {
       row: r ? r.row : {}, variables: currentVars(),
-      builtins: { EMAIL: r ? toOf(r) : "", NAME: r ? nameOf(r) : "", SENDER_NAME: settings.senderName || S.googleName || "", SENDER_EMAIL: senderEmail() }
+      builtins: { EMAIL: r ? toOf(r) : "", NAME: r ? nameOf(r) : "", SENDER_NAME: settings.senderName || S.googleName || (S.email ? S.email.split("@")[0] : "[your name]"), SENDER_EMAIL: senderEmail() || "[your Gmail address]" }
     };
     const subject = C.render($("#subject").value, ctx, { html: false, missing }).replace(/\s+/g, " ").trim();
     const designed = settings.style !== "plain";

@@ -2,7 +2,7 @@
 
 Personalised bulk email from your own Gmail, in the browser.
 
-Upload an Excel or CSV list of clients, write one template with merge fields like `{{First Name}}`, preview every email, then send at a safe, human pace. It comes with the **UK Client Outreach** template from The Richmond Studios built in, and anyone can write and save their own.
+Upload an Excel or CSV list of clients, write one template with merge fields like `{{First Name}}`, preview every email, then send at a safe, human pace. It comes with a ready-made designed email template, and anyone can edit it or write and save their own.
 
 **Live site:** https://atharvabankarsound.github.io/Auto-client-Outreach/
 
@@ -46,7 +46,7 @@ The site needs a Google Cloud OAuth client ID before anyone can connect Gmail.
 In *Testing* mode only your listed test users can connect, and their sign-in expires after 7 days. To let anyone use it:
 
 - Click **Publish app** under **Audience**. Because `gmail.send` is a *sensitive* scope, Google then requires **app verification** (brand review; no paid security audit, since this app uses no *restricted* scopes).
-- Verification requires a domain you own on the consent screen. `github.io` can't be verified as yours, so point a custom domain at GitHub Pages first, e.g. `outreach.therichmondstudios.co.uk` (repo **Settings → Pages → Custom domain**), verify it in Google Search Console, and use those URLs in step 3 and step 6.
+- Verification requires a domain you own on the consent screen. `github.io` can't be verified as yours, so point a custom domain at GitHub Pages first, e.g. `outreach.yourdomain.com` (repo **Settings → Pages → Custom domain**), verify it in Google Search Console, and use those URLs in step 3 and step 6.
 - Until it's verified, users may see a “Google hasn't verified this app” screen and there's a 100-user cap.
 
 Visitors can also paste **their own** client ID under **Settings → Advanced** if they want to use their own Google Cloud project.
@@ -66,16 +66,16 @@ python3 -m http.server 8000
 
 First row = column headings. Any columns work; one must contain email addresses. See [`sample-contacts.xlsx`](sample-contacts.xlsx).
 
-For the **UK Client Outreach** template, these columns personalise each email (empty cells fall back to the campaign variables):
+For the built-in **Designed outreach email** template, these columns personalise each email (empty cells fall back to the campaign variables):
 
 | Column | Used for |
 |---|---|
 | `Email` | recipient |
-| `First Names` | “Hi Corry and Luke,” (falls back to “there”) |
-| `Show` | show / channel name in subject, body and links |
+| `First Name` | “Hi Alex,” (falls back to “there”) |
+| `Company` | company name in subject and body |
 | `Hook` | the opening, personal sentence |
-| `Audio Pain` | the typical audio problem for their format |
-| `Eyebrow`, `Headline` | optional per-row overrides |
+
+Any campaign variable (e.g. `Headline`, `Offer`) can also be a column, to override it per row. Set your own company name, website, services and accent colour under **Edit email template → Campaign variables**.
 
 ## Sending responsibly
 
@@ -91,10 +91,9 @@ index.html          the app
 config.js           Google client ID and defaults
 assets/app.js       UI, Gmail sign-in and sending
 assets/core.js      merge-field rendering, email parsing, MIME building (no DOM)
-assets/templates.js built-in templates (UK Client Outreach, Simple, Blank)
+assets/templates.js built-in templates (Designed, Simple, Blank)
 assets/styles.css
 privacy.html, terms.html
 sample-contacts.xlsx / .csv
 ```
 
-© 2026 The Richmond Studios Ltd.

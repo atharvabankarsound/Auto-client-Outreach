@@ -53,7 +53,7 @@
     <summary>Edit email template <span class="note" id="tplName"></span></summary>
     <div class="tplgrid">
       <label class="field"><span>Template</span><select class="in" id="templateSelect"></select></label>
-      <label class="field"><span>Campaign name <i>(keeps track of who's been emailed)</i></span><input class="in" id="campaignName" type="text" placeholder="e.g. UK podcasts – Nov"></label>
+      <label class="field"><span>Campaign name <i>(keeps track of who's been emailed)</i></span><input class="in" id="campaignName" type="text" placeholder="e.g. Spring outreach"></label>
     </div>
     <div class="btnrow">
       <button class="btn sm" type="button" id="saveTemplateBtn">Save as my template</button>
@@ -160,9 +160,9 @@
 <dialog id="settingsDialog">
   <form method="dialog" class="dialog-body">
     <h2>Settings</h2>
-    <label class="field"><span>Sender name shown to recipients</span><input class="in" id="senderName" type="text" placeholder="e.g. Atharva at The Richmond Studios"></label>
+    <label class="field"><span>Sender name shown to recipients</span><input class="in" id="senderName" type="text" placeholder="e.g. Alex at Example Studio"></label>
     <label class="field"><span>Send from address (optional)</span><input class="in" id="fromAlias" type="email" placeholder="Leave empty to use your Gmail address">
-      <small>Must already be set up in Gmail → Settings → Accounts → “Send mail as”, e.g. contact@yourstudio.co.uk. Otherwise Gmail uses your main address.</small></label>
+      <small>Must already be set up in Gmail → Settings → Accounts → “Send mail as”, e.g. hello@yourcompany.com. Otherwise Gmail uses your main address.</small></label>
     <label class="field"><span>Reply-to address (optional)</span><input class="in" id="replyTo" type="email"></label>
     <div class="tplgrid">
       <label class="field"><span>Seconds between emails</span><span class="inline"><input class="in" id="delayMin" type="number" min="5"> to <input class="in" id="delayMax" type="number" min="5"></span></label>
